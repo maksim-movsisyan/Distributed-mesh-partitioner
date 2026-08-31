@@ -2,6 +2,8 @@
 
 #include <vector>
 #include <string>
+#include <utility>
+#include <cstdint>
 
 #include <mpi.h>
 #include "cfd/core/types.hpp"
@@ -21,11 +23,12 @@ struct FileMeta {
 
 struct SectionMeta {
     std::string name;
-    mesh::CellType type;
-    GlobalIndex start = 0;        // Global (1-based) first element ID in CGNS
-    GlobalIndex end = 0;          // Global (1-based) last element ID in CGNS
-    GlobalIndex cell_offset = 0;  // 0-based global ID offset for volume cells
-    int sec_idx = 0;              // 1-based section index in CGNS file
+    mesh::CellType type = mesh::CellType::HEXA; // CellType for uniform sections
+    bool is_mixed = false;                      // True if MIXED
+    GlobalIndex start = 0;                      // Global (1-based) first element ID in CGNS
+    GlobalIndex end = 0;                        // Global (1-based) last element ID in CGNS
+    GlobalIndex cell_offset = 0;                // 0-based global ID offset for volume cells
+    int sec_idx = 0;                            // 1-based section index in CGNS file
 };
 
 
@@ -65,7 +68,6 @@ struct RawMesh {
     std::vector<LocalIndex> cnodes_offsets;
     std::vector<GlobalIndex> cnodes;
 
-
     // Coordinates of local node slice [my_node_begin(), my_node_end()) in SoA layout
     std::vector<double> my_node_coords_x;
     std::vector<double> my_node_coords_y;
@@ -75,7 +77,7 @@ struct RawMesh {
     std::vector<SurfElem> surf_elems;
 
     // Replicated metadata across all ranks
-    FileMeta gfm;                             // general_file_metadata
+    FileMeta gfm;
     std::vector<SectionMeta> vol_secs;
     std::vector<SectionMeta> surf_secs;
     std::vector<BCMeta> bcs;

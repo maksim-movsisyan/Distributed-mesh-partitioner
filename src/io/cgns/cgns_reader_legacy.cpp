@@ -18,84 +18,18 @@ namespace {
 mesh::CellType cgns_elem_to_type(ElementType e, MPI_Comm comm) {
     switch (e) {
         case CGNS_ENUMV(TETRA_4): return mesh::CellType::TET;
-        case CGNS_ENUMV(PYRA_5):  return mesh::CellType::PYRA;
+        case CGNS_ENUMV(PYRA_5): return mesh::CellType::PYRA;
         case CGNS_ENUMV(PENTA_6): return mesh::CellType::PRISM;
-        case CGNS_ENUMV(HEXA_8):  return mesh::CellType::HEXA;
-        case CGNS_ENUMV(TRI_3):   return mesh::CellType::TRI;
-        case CGNS_ENUMV(QUAD_4):  return mesh::CellType::QUAD;
+        case CGNS_ENUMV(HEXA_8): return mesh::CellType::HEXA;
+        case CGNS_ENUMV(TRI_3): return mesh::CellType::TRI;
+        case CGNS_ENUMV(QUAD_4): return mesh::CellType::QUAD;
         default:
-            mpi::fatal(comm, "Unsupported homogeneous CGNS element type: " + 
-                       std::to_string(static_cast<int>(e)));
+            mpi::fatal(comm, "Unsupported CGNS element type: " + std::to_string(static_cast<int>(e)) +
+                        " (MIXED and high-order elements are not supported)");
             return mesh::CellType::HEXA;
     }
 }
 
-inline std::pair<mesh::CellType, int> parse_cgns_element_header(ElementType e, MPI_Comm comm) {
-    switch (e) {
-        case CGNS_ENUMV(TETRA_4): return {mesh::CellType::TET, 4};
-        case CGNS_ENUMV(PYRA_5):  return {mesh::CellType::PYRA, 5};
-        case CGNS_ENUMV(PENTA_6): return {mesh::CellType::PRISM, 6};
-        case CGNS_ENUMV(HEXA_8):  return {mesh::CellType::HEXA, 8};
-        case CGNS_ENUMV(TRI_3):   return {mesh::CellType::TRI, 3};
-        case CGNS_ENUMV(QUAD_4):  return {mesh::CellType::QUAD, 4};
-        default:
-            mpi::fatal(comm, "Unsupported element type in MIXED section: " + 
-                       std::to_string(static_cast<int>(e)));
-            return {mesh::CellType::HEXA, 8};
-    }
-}
-
-inline void sort_face_key_nodes(mesh::FaceKey& key, int npt) noexcept {
-    if (npt == 3) {
-        if (key.v[0] > key.v[1]) std::swap(key.v[0], key.v[1]);
-        if (key.v[1] > key.v[2]) std::swap(key.v[1], key.v[2]);
-        if (key.v[0] > key.v[1]) std::swap(key.v[0], key.v[1]);
-    } else if (npt == 4) {
-        std::sort(key.v.begin(), key.v.end());
-    }
-}
-
-std::vector<cgsize_t> read_mixed_section_raw(
-    int f_id, int B, int Z, const mesh::SectionMeta& s,
-    const std::vector<GlobalIndex>& displs_elem,
-    int rank, MPI_Comm comm) {
-    static_cast<void>(comm);
-
-    const GlobalIndex sec_n = s.end - s.start + 1;
-    cgsize_t datasize = 0;
-    check(cg_ElementDataSize(f_id, B, Z, s.sec_idx, &datasize), "cg_ElementDataSize");
-    
-    if (datasize == 0 || sec_n == 0) {
-        return {};
-    }
-
-    std::vector<cgsize_t> full_buf(static_cast<std::size_t>(datasize));
-    std::vector<cgsize_t> elem_offsets(static_cast<std::size_t>(sec_n) + 1, 0);
-    check(cg_poly_elements_read(f_id, B, Z, s.sec_idx,
-          full_buf.data(), elem_offsets.data(), nullptr),
-          "cg_poly_elements_read(MIXED)");
-
-    GlobalIndex r_lo = displs_elem[static_cast<std::size_t>(rank)];
-    GlobalIndex r_hi = displs_elem[static_cast<std::size_t>(rank) + 1];
-
-    GlobalIndex lo = std::max(s.cell_offset, r_lo);
-    GlobalIndex hi = std::min(s.cell_offset + sec_n, r_hi);
-
-    if (lo >= hi) {
-        return {};
-    }
-
-    GlobalIndex local_elem_start = lo - s.cell_offset;
-    GlobalIndex local_elem_end   = hi - s.cell_offset;
-
-    std::size_t byte_start = static_cast<std::size_t>(elem_offsets[static_cast<std::size_t>(local_elem_start)]);
-    std::size_t byte_end   = static_cast<std::size_t>(elem_offsets[static_cast<std::size_t>(local_elem_end)]);
-
-    return std::vector<cgsize_t>(
-        full_buf.begin() + static_cast<std::ptrdiff_t>(byte_start),
-        full_buf.begin() + static_cast<std::ptrdiff_t>(byte_end)
-    );
-}
 
 } // namespace
 
@@ -131,7 +65,7 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
     else if (m.gfm.storage_type == 2) storage_str = "HDF5";
     else if (m.gfm.storage_type == 0) storage_str = "None/Error";
     mpi::log_stat("CGNS: Version='%.2f', Integer precision='%d bits', Storage type='%s'", 
-                  m.gfm.cgns_version, m.gfm.file_integer_precision, storage_str);
+                m.gfm.cgns_version, m.gfm.file_integer_precision, storage_str);
 
 
     // Base metadata
@@ -163,7 +97,7 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
     m.n_cells_g = static_cast<GlobalIndex>(sizes[1]);
 
     mpi::log_stat("CGNS: Base='%s', Zone='%s', Total Nodes=%lld, Total Cells=%lld", 
-                  basename, zonename, static_cast<long long>(m.n_nodes_g), static_cast<long long>(m.n_cells_g));
+                      basename, zonename, static_cast<long long>(m.n_nodes_g), static_cast<long long>(m.n_cells_g));
 
 
     // Read Element Section Metadata
@@ -181,19 +115,17 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
               &etype, &start, &end, &nbndry, &parent_flag), 
               "cg_section_read");
 
+        // get section elements type (+ check if element type is supported)
+        const mesh::CellType t = cgns_elem_to_type(etype, comm);
+
         mesh::SectionMeta sm;
         sm.name = secname;
+        sm.type = t;
         sm.start = static_cast<GlobalIndex>(start);
         sm.end = static_cast<GlobalIndex>(end);
         sm.sec_idx = S;
-        sm.is_mixed = (etype == CGNS_ENUMV(MIXED));
 
-        if (!sm.is_mixed) {
-            sm.type = cgns_elem_to_type(etype, comm);
-        }
-
-        // Volume section range is [1, n_cells_g]
-        if (sm.start <= m.n_cells_g) {
+        if (mesh::is_volume_type(t)) {
             m.vol_secs.push_back(sm);
         } else {
             m.surf_secs.push_back(sm);
@@ -215,7 +147,7 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
     if (m.n_cells_g == 0 || total_cells != m.n_cells_g) { mpi::fatal(comm, "Mismatch or zero volume cells in CGNS zone"); }
 
     mpi::log_stat("CGNS: Volume sections=%zu, Total Cells=%lld, Boundary sections=%zu", 
-                  m.vol_secs.size(), static_cast<long long>(m.n_cells_g), m.surf_secs.size());
+                      m.vol_secs.size(), static_cast<long long>(m.n_cells_g), m.surf_secs.size());
 
 
     // Read Boundary Conditions (ZoneBC)
@@ -282,11 +214,11 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
     for (const auto& b : m.bcs) {
         m.patch_list.push_back({b.name, b.cgns_type});
         mpi::log_stat("CGNS: BC '%s' Type=%s Faces=%zu -> PatchId=%d", 
-                      b.name.c_str(), b.cgns_type.c_str(), b.eids.size(), 
-                      static_cast<int>(m.patch_list.size() - 1));
+                          b.name.c_str(), b.cgns_type.c_str(), b.eids.size(), 
+                          static_cast<int>(m.patch_list.size() - 1));
     } // end loop over processed boundary conditions
 
-    
+
     // Read Surface Sections (Collective)
     {
         std::unordered_map<GlobalIndex, PatchId> eid2patch;
@@ -308,62 +240,35 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
             const GlobalIndex lo = d[static_cast<std::size_t>(rank)];
             const GlobalIndex hi = d[static_cast<std::size_t>(rank) + 1];
 
+            // get number of nodes per section element type
+            const std::size_t npt = static_cast<std::size_t>(mesh::kNodesPerType[static_cast<std::size_t>(s.type)]);
             const std::size_t local_count = (lo < hi) ? static_cast<std::size_t>(hi - lo) : 0;
+            std::vector<cgsize_t> buf(local_count * npt);
 
-            if (s.is_mixed) {
-                std::vector<cgsize_t> buf = read_mixed_section_raw(
-                    f_id, B, Z, s, d, rank, comm);
+            // In collective mode, all ranks must participate; 0-sized reads pass rs=1, re=0
+            const cgsize_t rs = (lo < hi) ? static_cast<cgsize_t>(s.start + lo) : 1;
+            const cgsize_t re = (lo < hi) ? static_cast<cgsize_t>(s.start + hi - 1) : 0;
 
-                std::size_t ptr = 0;
-                for (std::size_t i = 0; i < local_count; ++i) {
-                    mesh::SurfElem se;
-                    auto raw_type = static_cast<ElementType>(buf[ptr++]);
-                    auto [stype, npt] = parse_cgns_element_header(raw_type, comm);
+            check(cgp_elements_read_data(f_id, B, Z, s.sec_idx, rs, re, buf.data()),
+                  "cgp_elements_read_data(surface)");
 
-                    for (int k = 0; k < npt; ++k) {
-                        se.key.v[static_cast<std::size_t>(k)] = static_cast<GlobalIndex>(buf[ptr++] - 1);
-                    }
-                    sort_face_key_nodes(se.key, npt);
+            // skip blank ranges
+            if (lo >= hi) continue;
 
-                    se.eid = s.start + lo + static_cast<GlobalIndex>(i);
-                    const auto it = eid2patch.find(se.eid);
-                    se.patch = (it != eid2patch.end()) ? it->second : kInvalidPatchId;
-
-                    m.surf_elems.push_back(se);
+            // loop over local surface elements
+            for (std::size_t i = 0; i < local_count; ++i) {
+                mesh::SurfElem se;
+                for (std::size_t k = 0; k < npt; ++k) {
+                    se.key.v[k] = static_cast<GlobalIndex>(buf[i * npt + k] - 1); // back to 0-based
                 }
-            } else {
-                // get number of nodes per section element type
-                const std::size_t npt = static_cast<std::size_t>(mesh::kNodesPerType[static_cast<std::size_t>(s.type)]);
-                std::vector<cgsize_t> buf(local_count * npt);
+                std::sort(se.key.v.begin(), se.key.v.end());
 
-                // In collective mode, all ranks must participate; 0-sized reads pass rs=1, re=0
-                const cgsize_t rs = (lo < hi) ? static_cast<cgsize_t>(s.start + lo) : 1;
-                const cgsize_t re = (lo < hi) ? static_cast<cgsize_t>(s.start + hi - 1) : 0;
+                se.eid = s.start + lo + static_cast<GlobalIndex>(i);
+                const auto it = eid2patch.find(se.eid);
+                se.patch = (it != eid2patch.end()) ? it->second : kInvalidPatchId;
 
-                cgsize_t dummy_elem = 0;
-                cgsize_t* pbuf = (local_count > 0) ? buf.data() : &dummy_elem;
-
-                check(cgp_elements_read_data(f_id, B, Z, s.sec_idx, rs, re, pbuf),
-                      "cgp_elements_read_data(surface)");
-
-                // skip blank ranges
-                if (lo >= hi) continue;
-
-                // loop over local surface elements
-                for (std::size_t i = 0; i < local_count; ++i) {
-                    mesh::SurfElem se;
-                    for (std::size_t k = 0; k < npt; ++k) {
-                        se.key.v[k] = static_cast<GlobalIndex>(buf[i * npt + k] - 1); // back to 0-based
-                    }
-                    sort_face_key_nodes(se.key, static_cast<int>(npt));
-
-                    se.eid = s.start + lo + static_cast<GlobalIndex>(i);
-                    const auto it = eid2patch.find(se.eid);
-                    se.patch = (it != eid2patch.end()) ? it->second : kInvalidPatchId;
-
-                    m.surf_elems.push_back(se);
-                } // end loop over local surface elements
-            }
+                m.surf_elems.push_back(se);
+            } // end loop over local surface elements
         } // end loop over all surface sections
     }
 
@@ -372,14 +277,13 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
     m.cell_displ = mpi::block_displ(m.n_cells_g, static_cast<std::size_t>(nprocs));
     m.node_displ = mpi::block_displ(m.n_nodes_g, static_cast<std::size_t>(nprocs));
 
-    
+
     // Read Volume Cell Connectivity (Collective)
     const LocalIndex nl = m.n_local_cells();
     m.ctype.reserve(static_cast<std::size_t>(nl));
 
-    m.cnodes_offsets.reserve(static_cast<std::size_t>(nl) + 1);
-    m.cnodes_offsets.push_back(0);
-
+    // Calculate total local connectivity size
+    std::size_t total_conn_entries = 0;
     // loop over volume sections to estimate connectivity memory
     for (const auto& s : m.vol_secs) {
         const GlobalIndex sec_n = s.end - s.start + 1;
@@ -387,58 +291,60 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
         const GlobalIndex ce = m.cell_displ[static_cast<std::size_t>(rank) + 1];
         const GlobalIndex lo = std::max(s.cell_offset, cb);
         const GlobalIndex hi = std::min(s.cell_offset + sec_n, ce);
-        const std::size_t local_count = (lo < hi) ? static_cast<std::size_t>(hi - lo) : 0;
 
-        if (s.is_mixed) {
-            std::vector<cgsize_t> buf = read_mixed_section_raw(
-                f_id, B, Z, s, m.cell_displ, rank, comm);
-
-            std::size_t ptr = 0;
-            for (std::size_t i = 0; i < local_count; ++i) {
-                auto raw_type = static_cast<ElementType>(buf[ptr++]);
-                auto [cell_t, npts] = parse_cgns_element_header(raw_type, comm);
-
-                m.ctype.push_back(cell_t);
-                for (int k = 0; k < npts; ++k) {
-                    m.cnodes.push_back(static_cast<GlobalIndex>(buf[ptr++] - 1));
-                }
-                m.cnodes_offsets.push_back(static_cast<LocalIndex>(m.cnodes.size()));
-            }
-        } else {
-            const std::size_t npt = static_cast<std::size_t>(mesh::kNodesPerType[static_cast<std::size_t>(s.type)]);
-            std::vector<cgsize_t> buf(local_count * npt);
-
-            const cgsize_t rs = (lo < hi) ? static_cast<cgsize_t>(s.start + (lo - s.cell_offset)) : 1;
-            const cgsize_t re = (lo < hi) ? static_cast<cgsize_t>(s.start + (hi - 1 - s.cell_offset)) : 0;
-
-            cgsize_t dummy_elem = 0;
-            cgsize_t* pbuf = (local_count > 0) ? buf.data() : &dummy_elem;
-
-            check(cgp_elements_read_data(f_id, B, Z, s.sec_idx, rs, re, pbuf),
-                  "cgp_elements_read_data(volume)");
-
-            if (lo >= hi) continue;
-
-            for (std::size_t i = 0; i < local_count; ++i) {
-                m.ctype.push_back(s.type);
-                for (std::size_t k = 0; k < npt; ++k) {
-                    m.cnodes.push_back(static_cast<GlobalIndex>(buf[i * npt + k] - 1));
-                }
-                m.cnodes_offsets.push_back(static_cast<LocalIndex>(m.cnodes.size()));
-            }
+        if (lo < hi) {
+            const auto npt = static_cast<std::size_t>(mesh::kNodesPerType[static_cast<std::size_t>(s.type)]);
+            total_conn_entries += static_cast<std::size_t>(hi - lo) * npt;
         }
+    } // end loop over volume sections to estimate connectivity memory
+    m.cnodes.reserve(total_conn_entries);
+    m.cnodes_offsets.reserve(static_cast<std::size_t>(nl) + 1);
+    m.cnodes_offsets.push_back(0);
+
+    // loop over all volume sections
+    for (const auto& s : m.vol_secs) {
+        const GlobalIndex sec_n = s.end - s.start + 1;
+        const GlobalIndex cb = m.cell_displ[static_cast<std::size_t>(rank)];
+        const GlobalIndex ce = m.cell_displ[static_cast<std::size_t>(rank) + 1];
+        const GlobalIndex lo = std::max(s.cell_offset, cb);
+        const GlobalIndex hi = std::min(s.cell_offset + sec_n, ce);
+
+        const auto npt = static_cast<std::size_t>(mesh::kNodesPerType[static_cast<std::size_t>(s.type)]);
+        const std::size_t local_count = (lo < hi) ? static_cast<std::size_t>(hi - lo) : 0;
+        std::vector<cgsize_t> buf(local_count * npt);
+
+        // In collective mode, all ranks must participate; 0-sized reads pass rs=1, re=0
+        const cgsize_t rs = (lo < hi) ? static_cast<cgsize_t>(s.start + (lo - s.cell_offset)) : 1;
+        const cgsize_t re = (lo < hi) ? static_cast<cgsize_t>(s.start + (hi - 1 - s.cell_offset)) : 0;
+
+        check(cgp_elements_read_data(f_id, B, Z, s.sec_idx, rs, re, buf.data()),
+              "cgp_elements_read_data(volume)");
+
+        if (lo >= hi) continue;
+
+        // loop over local section cells
+        for (std::size_t i = 0; i < local_count; ++i) {
+            m.ctype.push_back(s.type);
+            for (std::size_t k = 0; k < npt; ++k) {
+                // CGNS 1-based node IDs converted to 0-based
+                m.cnodes.push_back(static_cast<GlobalIndex>(buf[i * npt + k] - 1));
+            }
+            m.cnodes_offsets.push_back(static_cast<LocalIndex>(m.cnodes.size()));
+        } // end loop over local section cells
     } // end loop over all volume sections
 
-    if (m.cnodes_offsets.size() != static_cast<std::size_t>(nl) + 1) {
-        mpi::fatal(comm, "Consistency error in raw mesh cell nodes CSR table");
-    }
+    if (m.cnodes_offsets.size() != static_cast<std::size_t>(nl) + 1||
+        static_cast<std::size_t>(m.cnodes_offsets[static_cast<std::size_t>(nl)])
+            != static_cast<std::size_t>(total_conn_entries)) {
+                mpi::fatal(comm, "Consistency error in raw mesh cell nodes CSR table");
+        }
 
     if (m.ctype.size() != static_cast<std::size_t>(nl)) {
         mpi::fatal(comm, "Mismatch in read volume cells: got " + std::to_string(m.ctype.size()) +
                     ", expected " + std::to_string(nl));
     }
 
-
+    // Read Local Node Slice Coordinates in SoA Layout (Collective)
     const GlobalIndex nb = m.my_node_begin();
     const GlobalIndex ne = m.my_node_end();
     const std::size_t nmy = (nb < ne) ? static_cast<std::size_t>(ne - nb) : 0;
@@ -447,19 +353,24 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
     m.my_node_coords_y.resize(nmy);
     m.my_node_coords_z.resize(nmy);
 
+    // In collective mode, all ranks participate with non-blocking/empty bounds
     cgsize_t rs = (nmy > 0) ? static_cast<cgsize_t>(nb + 1) : 1;
     cgsize_t re = (nmy > 0) ? static_cast<cgsize_t>(ne) : 0;
 
-    double dummy_coord = 0.0;
-    double* px = (nmy > 0) ? m.my_node_coords_x.data() : &dummy_coord;
-    double* py = (nmy > 0) ? m.my_node_coords_y.data() : &dummy_coord;
-    double* pz = (nmy > 0) ? m.my_node_coords_z.data() : &dummy_coord;
+    // Coordinate X (dir = 1)
+    check(cgp_coord_read_data(f_id, B, Z, 1, &rs, &re, m.my_node_coords_x.data()),
+          "cgp_coord_read_data(X)");
 
-    check(cgp_coord_read_data(f_id, B, Z, 1, &rs, &re, px), "cgp_coord_read_data(X)");
-    check(cgp_coord_read_data(f_id, B, Z, 2, &rs, &re, py), "cgp_coord_read_data(Y)");
-    check(cgp_coord_read_data(f_id, B, Z, 3, &rs, &re, pz), "cgp_coord_read_data(Z)");
+    // Coordinate Y (dir = 2)
+    check(cgp_coord_read_data(f_id, B, Z, 2, &rs, &re, m.my_node_coords_y.data()),
+          "cgp_coord_read_data(Y)");
 
-    mpi::log_rank("CGNS Rank %d: Local Cells=%d, Local Nodes=%zu", rank, nl, nmy);
+    // Coordinate Z (dir = 3)
+    check(cgp_coord_read_data(f_id, B, Z, 3, &rs, &re, m.my_node_coords_z.data()),
+          "cgp_coord_read_data(Z)");
+
+    mpi::log_rank("CGNS Rank %d: Local Cells=%d, Local Nodes=%zu", 
+                  rank, nl, nmy);
 
     return m;
 }

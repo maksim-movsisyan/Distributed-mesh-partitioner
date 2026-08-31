@@ -846,7 +846,7 @@ void migrate_local_mesh(
     MPI_Alltoall(hs_send_counts.data(), 1, MPI_INT, hs_recv_counts.data(), 1, MPI_INT, comm);
 
     std::vector<GhostHandshakeMsg> hs_recv_buf;
-    mpi::alltoallv_packed(comm, nprocs, hs_recv_counts, hs_send_buf, hs_recv_buf);
+    mpi::alltoallv_packed(comm, nprocs, hs_send_counts, hs_send_buf, hs_recv_buf);
 
     for (std::size_t i = 0; i < n_nb; ++i) {
         const int neigh = mp.nb_ranks[i];
