@@ -365,7 +365,7 @@ int main(int argc, char** argv) {
     //  1. Cell Metrics:
     //     - Centroids: Computed as the arithmetic mean of cell vertices for all [0, n_cells) cells;
     //     - Volumes: Calculated via Gauss' Divergence Theorem over polyhedral boundary faces
-    //       (supports arbitrary mixed topologies: TET, PYRA, PRISM, HEXA).
+    //       (supports arbitrary mixed topologies: TET, PYRA, PRISM, HEXA, MIXED).
     //     - Positivity Guarantee: Asserts volume $V > 10^{-15}$ for all cells; aborts with a diagnostic
     //       dump if degenerate or inverted elements are detected.
     //

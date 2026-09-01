@@ -66,6 +66,10 @@ if(NOT TARGET CGNS::cgns_static)
     )
 endif()
 
+set_property(TARGET CGNS::cgns_static PROPERTY INTERFACE_LINK_LIBRARIES "")
+target_link_libraries(CGNS::cgns_static INTERFACE HDF5::HDF5)
+
+
 #==================================================================
 #==== DKAMINPAR LIBRARY ===========================================
 #==================================================================

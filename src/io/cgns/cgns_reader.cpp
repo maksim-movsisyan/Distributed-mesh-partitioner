@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <unordered_map>
 #include <vector>
 #include <cstddef>
@@ -55,16 +56,93 @@ inline void sort_face_key_nodes(mesh::FaceKey& key, int npt) noexcept {
     }
 }
 
-std::vector<cgsize_t> read_mixed_section_raw(
+// Reads only THIS rank's slice of a MIXED section's flattened connectivity,
+// fully in parallel via the cgp_poly_elements_read_data_* API — no rank
+// ever downloads the full section, so this scales to grids where a single
+// process couldn't hold the whole MIXED block in memory.
+//
+// [rs, re] are absolute, 1-based, file-space element indices within the
+// section (same convention as cgp_elements_read_data's start/end elsewhere
+// in this file: for a surface section rs = s.start + lo, for a volume
+// section rs = s.start + (lo - s.cell_offset), etc). has_data must be false
+// when this rank owns no elements in the section.
+//
+// Important: unlike cgp_elements_read_data, a degenerate (rs=1, re=0) range
+// with a valid dummy buffer is NOT a safe way to signal "no data" here —
+// the offset arithmetic in cgp_poly_elements_read_data_offsets does not
+// collapse to a zero-size read for that case (verified against the CGNS
+// pcgnslib.c source), so it would make HDF5 attempt a real single-element
+// read at a bogus offset. The documented, correct way to skip is to pass a
+// NULL pointer, which is what the has_data == false branch below does.
+//
+// This intentionally never touches cgp_pio_mode(): CGP_COLLECTIVE (already
+// set once, globally, at the top of read_cgns_parallel) is sufficient for
+// this API and keeps every read in this file collective. If a particular
+// CGNS/HDF5 build turns out to need CGP_INDEPENDENT for these two calls,
+// switch it locally right here (and only here) and flip back to
+// CGP_COLLECTIVE immediately after, e.g.:
+//     check(cgp_pio_mode(CGP_INDEPENDENT), "cgp_pio_mode(INDEPENDENT)");
+//     ... the two cgp_poly_elements_read_data_* calls ...
+//     check(cgp_pio_mode(CGP_COLLECTIVE), "cgp_pio_mode(COLLECTIVE)");
+// so that only MIXED-section reads are ever affected.
+std::vector<cgsize_t> read_mixed_section_local(
+    int f_id, int B, int Z, int sec_idx,
+    cgsize_t rs, cgsize_t re, bool has_data) {
+
+    if (!has_data) {
+        check(cgp_poly_elements_read_data_offsets(f_id, B, Z, sec_idx, rs, re, nullptr),
+              "cgp_poly_elements_read_data_offsets(MIXED, empty)");
+        check(cgp_poly_elements_read_data_elements(f_id, B, Z, sec_idx, rs, re, nullptr, nullptr),
+              "cgp_poly_elements_read_data_elements(MIXED, empty)");
+        return {};
+    }
+
+    // offsets holds the local slice of ElementStartOffset for elements
+    // [rs, re]: (re - rs + 2) cumulative counts, i.e. one more than the
+    // number of elements, so we can size and index the flattened data.
+    std::vector<cgsize_t> offsets(static_cast<std::size_t>(re - rs + 2));
+    check(cgp_poly_elements_read_data_offsets(f_id, B, Z, sec_idx, rs, re, offsets.data()),
+          "cgp_poly_elements_read_data_offsets(MIXED)");
+
+    const cgsize_t local_size = offsets.back() - offsets.front();
+    std::vector<cgsize_t> elements(static_cast<std::size_t>(local_size));
+
+    check(cgp_poly_elements_read_data_elements(f_id, B, Z, sec_idx, rs, re,
+          offsets.data(), elements.data()),
+          "cgp_poly_elements_read_data_elements(MIXED)");
+
+    return elements;
+}
+
+// Fallback for MIXED sections written by CGNS libraries that predate the
+// ElementStartOffset side-array (SIDS/CGNS_VERSION < 4.0). Such files only
+// store the flat, type-tagged element stream ("ElementConnectivity") with
+// no separate offset dataset on disk at all, so cgp_poly_elements_read_data_
+// offsets/_elements above cannot work — it isn't a bug in how we call it,
+// the required HDF5 dataset simply does not exist in the file, and the
+// parallel API refuses outright ("H5Dopen2() failed") rather than
+// reconstructing offsets on the fly the way the serial cg_poly_elements_read
+// does. So for these files every rank reads the WHOLE section here (same as
+// the original, pre-refactor code) and keeps only its own local slice.
+// This is correct but not memory-scalable — the fix for that is not more
+// clever code, it's re-exporting the mesh with a CGNS >= 4.x library so the
+// file actually contains ElementStartOffset and the fast path can be used.
+//
+// local_elem_start/local_elem_end are 0-based, SECTION-RELATIVE element
+// indices (i.e. offsets from s.start), matching elem_offsets' own indexing.
+std::vector<cgsize_t> read_mixed_section_legacy_full(
     int f_id, int B, int Z, const mesh::SectionMeta& s,
-    const std::vector<GlobalIndex>& displs_elem,
-    int rank, MPI_Comm comm) {
-    static_cast<void>(comm);
+    GlobalIndex local_elem_start, GlobalIndex local_elem_end) {
 
     const GlobalIndex sec_n = s.end - s.start + 1;
     cgsize_t datasize = 0;
+    // Called unconditionally by every rank, even ones with an empty local
+    // range below — cg_ElementDataSize/cg_poly_elements_read appear to need
+    // collective participation on this file (same lesson learned the hard
+    // way with the boundary-condition read: skipping these calls on some
+    // ranks while others call them deadlocks).
     check(cg_ElementDataSize(f_id, B, Z, s.sec_idx, &datasize), "cg_ElementDataSize");
-    
+
     if (datasize == 0 || sec_n == 0) {
         return {};
     }
@@ -73,28 +151,18 @@ std::vector<cgsize_t> read_mixed_section_raw(
     std::vector<cgsize_t> elem_offsets(static_cast<std::size_t>(sec_n) + 1, 0);
     check(cg_poly_elements_read(f_id, B, Z, s.sec_idx,
           full_buf.data(), elem_offsets.data(), nullptr),
-          "cg_poly_elements_read(MIXED)");
+          "cg_poly_elements_read(MIXED, legacy)");
 
-    GlobalIndex r_lo = displs_elem[static_cast<std::size_t>(rank)];
-    GlobalIndex r_hi = displs_elem[static_cast<std::size_t>(rank) + 1];
-
-    GlobalIndex lo = std::max(s.cell_offset, r_lo);
-    GlobalIndex hi = std::min(s.cell_offset + sec_n, r_hi);
-
-    if (lo >= hi) {
+    if (local_elem_start >= local_elem_end) {
         return {};
     }
 
-    GlobalIndex local_elem_start = lo - s.cell_offset;
-    GlobalIndex local_elem_end   = hi - s.cell_offset;
-
-    std::size_t byte_start = static_cast<std::size_t>(elem_offsets[static_cast<std::size_t>(local_elem_start)]);
-    std::size_t byte_end   = static_cast<std::size_t>(elem_offsets[static_cast<std::size_t>(local_elem_end)]);
+    const std::size_t byte_start = static_cast<std::size_t>(elem_offsets[static_cast<std::size_t>(local_elem_start)]);
+    const std::size_t byte_end   = static_cast<std::size_t>(elem_offsets[static_cast<std::size_t>(local_elem_end)]);
 
     return std::vector<cgsize_t>(
         full_buf.begin() + static_cast<std::ptrdiff_t>(byte_start),
-        full_buf.begin() + static_cast<std::ptrdiff_t>(byte_end)
-    );
+        full_buf.begin() + static_cast<std::ptrdiff_t>(byte_end));
 }
 
 } // namespace
@@ -132,6 +200,14 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
     else if (m.gfm.storage_type == 0) storage_str = "None/Error";
     mpi::log_stat("CGNS: Version='%.2f', Integer precision='%d bits', Storage type='%s'", 
                   m.gfm.cgns_version, m.gfm.file_integer_precision, storage_str);
+
+    // Files written by CGNS libraries older than ~4.0 store MIXED-section
+    // connectivity WITHOUT a separate ElementStartOffset side-array on disk
+    // (just the flat, type-tagged element stream) — that array is required
+    // by cgp_poly_elements_read_data_offsets/_elements, so for such files we
+    // must fall back to the memory-heavy but correct full-section read
+    // instead of the fast distributed one. See read_mixed_section_legacy_full.
+    const bool mixed_needs_legacy_read = (m.gfm.cgns_version < 3.99f);
 
 
     // Base metadata
@@ -219,6 +295,16 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
 
 
     // Read Boundary Conditions (ZoneBC)
+    //
+    // NOTE: a rank-0-reads-then-broadcasts version of this block was tried
+    // and reliably deadlocked: the file is open via cgp_open(), and on this
+    // CGNS/HDF5 build the plain cg_* metadata/navigation calls used here
+    // (cg_nbocos, cg_boco_info, cg_goto, ...) apparently still require every
+    // rank to participate in lockstep — having only rank 0 call them while
+    // the others skipped straight to the broadcast left rank 0 blocked
+    // inside the HDF5 layer waiting for peers that never showed up. BC
+    // point-lists are normally tiny compared to the volume mesh anyway, so
+    // this loop stays fully collective (every rank reads identically).
     int nbocos = 0;
     check(cg_nbocos(f_id, B, Z, &nbocos), "cg_nbocos");
 
@@ -311,8 +397,14 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
             const std::size_t local_count = (lo < hi) ? static_cast<std::size_t>(hi - lo) : 0;
 
             if (s.is_mixed) {
-                std::vector<cgsize_t> buf = read_mixed_section_raw(
-                    f_id, B, Z, s, d, rank, comm);
+                std::vector<cgsize_t> buf;
+                if (mixed_needs_legacy_read) {
+                    buf = read_mixed_section_legacy_full(f_id, B, Z, s, lo, hi);
+                } else {
+                    const cgsize_t rs = (lo < hi) ? static_cast<cgsize_t>(s.start + lo) : 1;
+                    const cgsize_t re = (lo < hi) ? static_cast<cgsize_t>(s.start + hi - 1) : 0;
+                    buf = read_mixed_section_local(f_id, B, Z, s.sec_idx, rs, re, lo < hi);
+                }
 
                 std::size_t ptr = 0;
                 for (std::size_t i = 0; i < local_count; ++i) {
@@ -390,8 +482,14 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
         const std::size_t local_count = (lo < hi) ? static_cast<std::size_t>(hi - lo) : 0;
 
         if (s.is_mixed) {
-            std::vector<cgsize_t> buf = read_mixed_section_raw(
-                f_id, B, Z, s, m.cell_displ, rank, comm);
+            std::vector<cgsize_t> buf;
+            if (mixed_needs_legacy_read) {
+                buf = read_mixed_section_legacy_full(f_id, B, Z, s, lo - s.cell_offset, hi - s.cell_offset);
+            } else {
+                const cgsize_t rs = (lo < hi) ? static_cast<cgsize_t>(s.start + (lo - s.cell_offset)) : 1;
+                const cgsize_t re = (lo < hi) ? static_cast<cgsize_t>(s.start + (hi - 1 - s.cell_offset)) : 0;
+                buf = read_mixed_section_local(f_id, B, Z, s.sec_idx, rs, re, lo < hi);
+            }
 
             std::size_t ptr = 0;
             for (std::size_t i = 0; i < local_count; ++i) {

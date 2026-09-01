@@ -56,8 +56,8 @@ The standard `libcgns-dev` package from apt is NOT suitable: it is built without
 
 ```bash
 cd $HOME
-git clone --depth 1 --branch v4.4.0 https://github.com/CGNS/CGNS.git
-cmake -B CGNS/build -S CGNS -G Ninja \
+git clone --depth 1 --branch v4.5.2 https://github.com/CGNS/CGNS.git cgns-src-4-5-2
+cmake -B cgns-src-4-5-2/build -S cgns-src-4-5-2 -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER=mpicc \
     -DCGNS_ENABLE_HDF5=ON \
@@ -68,11 +68,11 @@ cmake -B CGNS/build -S CGNS -G Ninja \
     -DCGNS_BUILD_SHARED=OFF \
     -DCGNS_ENABLE_FORTRAN=OFF \
     -DCGNS_ENABLE_TESTS=OFF \
-    -DCMAKE_INSTALL_PREFIX=$HOME/local/cgns
+    -DCMAKE_INSTALL_PREFIX=$HOME/local/cgns-src-4-5-2
     #-DCMAKE_PREFIX_PATH=/usr/lib/x86_64-linux-gnu/hdf5/openmpi
     #-DCGNS_ENABLE_64BIT=ON
-cmake --build CGNS/build -j$(nproc)
-cmake --install CGNS/build
+cmake --build cgns-src-4-5-2/build -j$(nproc)
+cmake --install cgns-src-4-5-2/build
 ```
 
 Key flags:

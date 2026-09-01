@@ -14,7 +14,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_PREFIX_PATH": "$env{HOME}/local/cgns;$env{HOME}/local/kaminpar",
+        "CMAKE_PREFIX_PATH": "$env{HOME}/local/cgns-4-5-2;$env{HOME}/local/kaminpar",
         "BUILD_TESTING": "ON"
       }
     },
@@ -26,7 +26,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_PREFIX_PATH": "$env{HOME}/local/cgns;$env{HOME}/local/kaminpar",
+        "CMAKE_PREFIX_PATH": "$env{HOME}/local/cgns-4-5-2;$env{HOME}/local/kaminpar",
         "BUILD_TESTING": "ON"
       }
     }
