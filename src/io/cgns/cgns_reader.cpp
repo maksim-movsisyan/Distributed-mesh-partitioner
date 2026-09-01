@@ -600,8 +600,8 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
                 const cgsize_t rs = (lo < hi) ? static_cast<cgsize_t>(s.start + lo) : 1;
                 const cgsize_t re = (lo < hi) ? static_cast<cgsize_t>(s.start + hi - 1) : 0;
 
-                cgsize_t dummy_elem = 0;
-                cgsize_t* pbuf = (local_count > 0) ? buf.data() : &dummy_elem;
+                //cgsize_t dummy_elem = 0;
+                cgsize_t* pbuf = (local_count > 0) ? buf.data() : nullptr;
 
                 check(cgp_elements_read_data(f_id, B, Z, s.sec_idx, rs, re, pbuf),
                       "cgp_elements_read_data(surface)");
@@ -677,8 +677,8 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
             const cgsize_t rs = (lo < hi) ? static_cast<cgsize_t>(s.start + (lo - s.cell_offset)) : 1;
             const cgsize_t re = (lo < hi) ? static_cast<cgsize_t>(s.start + (hi - 1 - s.cell_offset)) : 0;
 
-            cgsize_t dummy_elem = 0;
-            cgsize_t* pbuf = (local_count > 0) ? buf.data() : &dummy_elem;
+            //cgsize_t dummy_elem = 0;
+            cgsize_t* pbuf = (local_count > 0) ? buf.data() : nullptr;
 
             check(cgp_elements_read_data(f_id, B, Z, s.sec_idx, rs, re, pbuf),
                   "cgp_elements_read_data(volume)");
