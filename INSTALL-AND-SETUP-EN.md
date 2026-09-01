@@ -68,9 +68,9 @@ cmake -B cgns-src-4-5-2/build -S cgns-src-4-5-2 -G Ninja \
     -DCGNS_BUILD_SHARED=OFF \
     -DCGNS_ENABLE_FORTRAN=OFF \
     -DCGNS_ENABLE_TESTS=OFF \
-    -DCMAKE_INSTALL_PREFIX=$HOME/local/cgns-src-4-5-2
+    -DCGNS_ENABLE_64BIT=OFF \
+    -DCMAKE_INSTALL_PREFIX=$HOME/local/cgns-4-5-2
     #-DCMAKE_PREFIX_PATH=/usr/lib/x86_64-linux-gnu/hdf5/openmpi
-    #-DCGNS_ENABLE_64BIT=ON
 cmake --build cgns-src-4-5-2/build -j$(nproc)
 cmake --install cgns-src-4-5-2/build
 ```
@@ -81,6 +81,14 @@ Key flags:
 - `CMAKE_C_COMPILER=mpicc` — CGNS must be compiled using the MPI compiler wrapper;
 - `-DCMAKE_PREFIX_PATH=/usr/lib/x86_64-linux-gnu/hdf5/openmpi` — points directly to the OpenMPI HDF5 installation paths in Ubuntu;
 - *(Optional)* `-DCGNS_ENABLE_64BIT=ON` — enable if working with large meshes (> 2 billion elements/nodes).
+
+`WARNING-1` : IF YOUR MESH CONTAINS MIXED SECTIONS, THEN -DCGNS_ENABLE_64BIT=OFF/ON - MUST BE CONSISTENT WITH FILE INTEGER PRECSISION, OTHERWISE THE CGNS-READER FALL BACK TO RAM HEAVY READ (IT WILL WORK BUT IT IS SLOWER AND CONTRIBUTE MORE RAM).
+
+`WARNING-2` : IF YOUR MESH CONTAINS MIXED SECTIONS, THEN YOU FILE VERISION (FILE, NOT CGNS) MUST BE MORE OR EQUAL 4.*, OTHERWISE THE CGNS-READER FALL BACK TO RAM HEAVY READ (IT WILL WORK BUT IT IS SLOWER AND CONTRIBUTE MORE RAM). TO UPDATE OLD FILE VERSION USE CGNS OFFICIAL UITILITIES:
+```bash
+~/local/cgns-4-5-2/bin/cgnsconvert -f -h ~/cfd/mesh-partitioner/mesh/sphere.cgns ~/cfd/mesh-partitioner/mesh/sphere_v4.cgns #convert to h5
+~/local/cgns-4-5-2/bin/cgnsupdate ~/cfd/mesh-partitioner/mesh/sphere_v4.cgns #update version
+```
 
 Verification: The CMake configuration summary must display `Parallel IO: ON`.
 

@@ -1,8 +1,14 @@
 #include "cfd/io/cgns/cgns_reader.hpp"
+#include <cgnstypes.h>
+#include <cgns_io.h>
+#include <mpi.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <vector>
 #include <cstddef>
@@ -75,6 +81,26 @@ inline void sort_face_key_nodes(mesh::FaceKey& key, int npt) noexcept {
 // read at a bogus offset. The documented, correct way to skip is to pass a
 // NULL pointer, which is what the has_data == false branch below does.
 //
+// On-disk integer widths (CRITICAL): cgp_poly_elements_read_data_offsets/
+// _elements pick their HDF5 MEMORY datatype from the FILE's stored datatype
+// of the array being read (pcgnslib.c uses section->connect_offset->data_type
+// and section->connect->data_type respectively), NOT from sizeof(cgsize_t)
+// the way cgp_elements_read_data does — HDF5 packs file-width elements into
+// whatever buffer we hand it, with no conversion. And nothing forces an
+// exporter to store ElementConnectivity and ElementStartOffset in the same
+// width, or in the file-wide index precision: mesh/sphere_v4.cgns (CGNS
+// 4.52) stores ElementConnectivity as I4 but ElementStartOffset as I8. With
+// 32-bit cgsize_t, reading such offsets into a vector<cgsize_t> makes HDF5
+// write 8 bytes per element into a 4-bytes-per-element buffer — a heap
+// overflow that surfaces as a segfault deep inside MPI-IO's free(). So each
+// array's on-disk width is queried first (mixed_array_disk_bytes below) and
+// every read goes through a width-matched scratch buffer before being
+// normalized to cgsize_t (read_mixed_width_safe below). The values
+// themselves always fit: they index arrays the CGNS library already
+// addresses with cgsize_t. Both queries run identically on EVERY rank
+// before the has_data branch, keeping the defensive metadata-read lockstep
+// the BC block above uses.
+//
 // This intentionally never touches cgp_pio_mode(): CGP_COLLECTIVE (already
 // set once, globally, at the top of read_cgns_parallel) is sufficient for
 // this API and keeps every read in this file collective. If a particular
@@ -85,9 +111,127 @@ inline void sort_face_key_nodes(mesh::FaceKey& key, int npt) noexcept {
 //     ... the two cgp_poly_elements_read_data_* calls ...
 //     check(cgp_pio_mode(CGP_COLLECTIVE), "cgp_pio_mode(COLLECTIVE)");
 // so that only MIXED-section reads are ever affected.
+
+// On-disk element width (4 for "I4", 8 for "I8") of one of a MIXED section's
+// child data arrays ("ElementStartOffset" / "ElementConnectivity"), or 0 if
+// the array is not present in the file. The mid-level CGNS API has no
+// accessor for these datatypes — cg_section_read reports none, and cg_goto
+// cannot descend under Elements_t nodes at all (its whitelist allows only
+// UserDefinedData_t there) — so this goes through the low-level cgio layer.
+// The walk mirrors CGNS's own index semantics (B-th CGNSBase_t under the
+// root, Z-th Zone_t, S-th Elements_t, then the child by its fixed array
+// name) and uses only independent serial metadata reads, which are safe
+// under cgp_open; every rank performs the identical walk.
+int mixed_array_disk_bytes(int f_id, int B, int Z, int sec_idx, const char* array_name) {
+    int cgio = 0;
+    check(cg_get_cgio(f_id, &cgio), "cg_get_cgio(MIXED)");
+
+    double node = 0;
+    check(cgio_get_root_id(cgio, &node), "cgio_get_root_id(MIXED)");
+
+    // root -> B-th CGNSBase_t -> Z-th Zone_t -> S-th Elements_t
+    const struct {
+        const char* label;
+        int index;
+    } path[] = {
+        {"CGNSBase_t", B},
+        {"Zone_t", Z},
+        {"Elements_t", sec_idx},
+    };
+    for (const auto& step : path) {
+        int nchildren = 0;
+        check(cgio_number_children(cgio, node, &nchildren), "cgio_number_children(MIXED)");
+
+        std::vector<double> children(static_cast<std::size_t>(nchildren));
+        int nret = 0;
+        check(cgio_children_ids(cgio, node, 1, nchildren, &nret, children.data()),
+              "cgio_children_ids(MIXED)");
+
+        int seen = 0;
+        bool found = false;
+        for (const double child : children) {
+            char label[33] = "";
+            check(cgio_get_label(cgio, child, label), "cgio_get_label(MIXED)");
+            if (std::strcmp(label, step.label) == 0 && ++seen == step.index) {
+                node = child;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw std::runtime_error(std::string("CGNS MIXED: cgio tree has no ") +
+                                     step.label + " #" + std::to_string(step.index));
+        }
+    }
+
+    double array_id = 0;
+    if (cgio_get_node_id(cgio, node, array_name, &array_id) != CG_OK) {
+        return 0;
+    }
+
+    char data_type[8] = "";
+    check(cgio_get_data_type(cgio, array_id, data_type), "cgio_get_data_type(MIXED)");
+    if (std::strcmp(data_type, "I4") == 0) { return 4; }
+    if (std::strcmp(data_type, "I8") == 0) { return 8; }
+    throw std::runtime_error(std::string("CGNS MIXED: unexpected on-disk data type '") +
+                             data_type + "' of " + array_name);
+}
+
+// Performs one collective cgp_poly_elements_read_data_* call for `count`
+// values whose elements are `width_bytes` wide ON DISK (cgp_call receives
+// the raw buffer, reinterpreted as cgsize_t*, and must run the call and
+// check() it), then returns the values normalized to cgsize_t. When the
+// on-disk width differs from sizeof(cgsize_t), the call goes through a
+// scratch vector of the exact on-disk width first: pcgnslib.c pins the HDF5
+// memory datatype to the FILE's datatype for these two calls, so handing it
+// a cgsize_t buffer of the other width would either overflow it (I8 file,
+// 32-bit cgsize_t) or fill it with interleaved halves (I4 file, 64-bit
+// cgsize_t).
+template <typename CgpCall>
+std::vector<cgsize_t> read_mixed_width_safe(std::size_t count, int width_bytes, CgpCall&& cgp_call) {
+    std::vector<cgsize_t> out(count);
+
+    if (width_bytes == static_cast<int>(sizeof(cgsize_t))) {
+        cgp_call(out.data());
+        return out;
+    }
+
+    if (width_bytes == 8 && sizeof(cgsize_t) == 4) {
+        std::vector<std::int64_t> raw(count);
+        cgp_call(reinterpret_cast<cgsize_t*>(raw.data()));
+        for (std::size_t i = 0; i < count; ++i) {
+            out[i] = static_cast<cgsize_t>(raw[i]);
+        }
+        return out;
+    }
+
+    if (width_bytes == 4 && sizeof(cgsize_t) == 8) {
+        std::vector<std::int32_t> raw(count);
+        cgp_call(reinterpret_cast<cgsize_t*>(raw.data()));
+        for (std::size_t i = 0; i < count; ++i) {
+            out[i] = static_cast<cgsize_t>(raw[i]);
+        }
+        return out;
+    }
+
+    throw std::runtime_error("CGNS MIXED: unsupported on-disk integer width");
+}
+
 std::vector<cgsize_t> read_mixed_section_local(
     int f_id, int B, int Z, int sec_idx,
     cgsize_t rs, cgsize_t re, bool has_data) {
+
+    // Queried by every rank, empty ones included, BEFORE the empty-rank
+    // early return — same defensive lockstep of identical serial metadata
+    // reads on all ranks as the BC block above.
+    const int offset_width = mixed_array_disk_bytes(f_id, B, Z, sec_idx, "ElementStartOffset");
+    const int conn_width = mixed_array_disk_bytes(f_id, B, Z, sec_idx, "ElementConnectivity");
+
+    if (offset_width == 0 || conn_width == 0) {
+        throw std::runtime_error(
+            "CGNS MIXED: section has no ElementStartOffset/ElementConnectivity "
+            "array on disk (unexpected for a CGNS >= 4.0 file)");
+    }
 
     if (!has_data) {
         check(cgp_poly_elements_read_data_offsets(f_id, B, Z, sec_idx, rs, re, nullptr),
@@ -98,18 +242,28 @@ std::vector<cgsize_t> read_mixed_section_local(
     }
 
     // offsets holds the local slice of ElementStartOffset for elements
-    // [rs, re]: (re - rs + 2) cumulative counts, i.e. one more than the
-    // number of elements, so we can size and index the flattened data.
-    std::vector<cgsize_t> offsets(static_cast<std::size_t>(re - rs + 2));
-    check(cgp_poly_elements_read_data_offsets(f_id, B, Z, sec_idx, rs, re, offsets.data()),
-          "cgp_poly_elements_read_data_offsets(MIXED)");
+    // [rs, re]: (re - rs + 2) cumulative counts in FILE space (i.e. relative
+    // to the whole section's connectivity, not to this rank's slice), one
+    // more than the number of elements, so we can size and index the
+    // flattened data. The file-space convention is load-bearing:
+    // cgp_poly_elements_read_data_elements plugs offsets[0] and
+    // offsets[end-start+1] straight into the global ElementConnectivity
+    // hyperslab, so the normalized values below must stay file-space.
+    const std::size_t n_offsets = static_cast<std::size_t>(re - rs + 2);
+    std::vector<cgsize_t> offsets = read_mixed_width_safe(
+        n_offsets, offset_width, [&](cgsize_t* buf) {
+            check(cgp_poly_elements_read_data_offsets(f_id, B, Z, sec_idx, rs, re, buf),
+                  "cgp_poly_elements_read_data_offsets(MIXED)");
+        });
 
     const cgsize_t local_size = offsets.back() - offsets.front();
-    std::vector<cgsize_t> elements(static_cast<std::size_t>(local_size));
 
-    check(cgp_poly_elements_read_data_elements(f_id, B, Z, sec_idx, rs, re,
-          offsets.data(), elements.data()),
-          "cgp_poly_elements_read_data_elements(MIXED)");
+    std::vector<cgsize_t> elements = read_mixed_width_safe(
+        static_cast<std::size_t>(local_size), conn_width, [&](cgsize_t* buf) {
+            check(cgp_poly_elements_read_data_elements(f_id, B, Z, sec_idx, rs, re,
+                  offsets.data(), buf),
+                  "cgp_poly_elements_read_data_elements(MIXED)");
+        });
 
     return elements;
 }
@@ -202,13 +356,27 @@ mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm) {
                   m.gfm.cgns_version, m.gfm.file_integer_precision, storage_str);
 
     // Files written by CGNS libraries older than ~4.0 store MIXED-section
-    // connectivity WITHOUT a separate ElementStartOffset side-array on disk
-    // (just the flat, type-tagged element stream) — that array is required
-    // by cgp_poly_elements_read_data_offsets/_elements, so for such files we
-    // must fall back to the memory-heavy but correct full-section read
-    // instead of the fast distributed one. See read_mixed_section_legacy_full.
-    const bool mixed_needs_legacy_read = (m.gfm.cgns_version < 3.99f);
+    // connectivity WITHOUT a separate ElementStartOffset side-array on disk...
+    //
+    // ADDITIONALLY: cgp_poly_elements_read_data_offsets/_elements (the fast
+    // path) pick their HDF5 memory datatype from the FILE's stored integer
+    // precision of the array being read, unlike cgp_elements_read_data
+    // which picks it from sizeof(cgsize_t) and lets HDF5 convert. Per-array
+    // width mismatches (e.g. I8 ElementStartOffset next to I4
+    // ElementConnectivity, as in mesh/sphere_v4.cgns) are now handled inside
+    // read_mixed_section_local via width-matched scratch buffers; this
+    // file-WIDE precision check stays as an extra conservative guard that
+    // routes grossly mismatched files to the legacy reader below.
+    const bool mixed_needs_legacy_read =
+        (m.gfm.cgns_version < 3.99f) ||
+        (m.gfm.file_integer_precision != static_cast<int>(sizeof(cgsize_t) * 8));
 
+        
+    if (mixed_needs_legacy_read) {
+        if (rank == 0) {
+            mpi::log_stat("CGNS WARNING: CGNS MIXED sections will be read (if exist) via ram-heavy fall back. See desciption in sgns_read.cpp line 205.");
+        }
+    }
 
     // Base metadata
     int nbases = 0;

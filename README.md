@@ -45,6 +45,8 @@ mesh/                     Local test meshes (git-ignored)
 
 For a step-by-step installation guide (WSL2 Ubuntu / Linux HPC clusters), see **[INSTALL-AND-SETUP-EN.md](INSTALL-AND-SETUP-EN.md)**.
 
+**If something went wrong with MIXED section meshes read [INSTALL-AND-SETUP-EN.md](INSTALL-AND-SETUP-EN.md) CGNS warnings first**
+
 ---
 
 ## Build
