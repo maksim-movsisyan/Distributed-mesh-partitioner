@@ -1,16 +1,16 @@
 #include "cfd/mesh/reorder.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <queue>
 #include <utility>
 #include <vector>
-#include <limits>
 
-
-#include "cfd/mesh/cgnstables.hpp"
 #include "cfd/core/types.hpp"
+#include "cfd/mesh/cgnstables.hpp"
 
 namespace cfd::mesh {
 
@@ -410,7 +410,7 @@ void apply_cell_permutation(MeshPart& mp, const std::vector<LocalIndex>& new2old
 
 
 
-    // 5. Update Face Connectivity & Re-sort Faces by (owner, neigh)
+    // 5. Update Face Connectivity & 3-Zone Re-sorting
     for (LocalIndex f = 0; f < mp.n_faces; ++f) {
         const std::size_t f_sz = static_cast<std::size_t>(f);
         mp.face_owner[f_sz] = old2new[static_cast<std::size_t>(mp.face_owner[f_sz])];
@@ -419,6 +419,13 @@ void apply_cell_permutation(MeshPart& mp, const std::vector<LocalIndex>& new2old
         }
     }
 
+    auto face_category = [&](LocalIndex f) noexcept -> int {
+        const LocalIndex neigh = mp.face_neigh[static_cast<std::size_t>(f)];
+        if (neigh < 0) return 2;             // Zone 2: Boundary face
+        if (neigh >= n_own) return 1;        // Zone 1: Inter-rank / Coupled face
+        return 0;                            // Zone 0: Purely internal face
+    };
+
     std::vector<LocalIndex> face_perm(static_cast<std::size_t>(mp.n_faces));
     for (LocalIndex f = 0; f < mp.n_faces; ++f) face_perm[static_cast<std::size_t>(f)] = f;
     
@@ -426,20 +433,25 @@ void apply_cell_permutation(MeshPart& mp, const std::vector<LocalIndex>& new2old
         const std::size_t a_sz = static_cast<std::size_t>(a);
         const std::size_t b_sz = static_cast<std::size_t>(b);
 
-        const bool a_is_bnd = (mp.face_neigh[a_sz] < 0);
-        const bool b_is_bnd = (mp.face_neigh[b_sz] < 0);
+        const int cat_a = face_category(a);
+        const int cat_b = face_category(b);
 
-        if (a_is_bnd != b_is_bnd) {
-            return !a_is_bnd;
+        // Sort by contiguous 3-zone layout: Internal -> Coupled -> Boundary
+        if (cat_a != cat_b) {
+            return cat_a < cat_b;
         }
 
-        if (a_is_bnd) {
+        // Zone 2 (Boundary): Group by patch_id, then sort by owner
+        if (cat_a == 2) {
             if (mp.face_patch[a_sz] != mp.face_patch[b_sz]) {
                 return mp.face_patch[a_sz] < mp.face_patch[b_sz];
             }
             return mp.face_owner[a_sz] < mp.face_owner[b_sz];
         }
 
+        // Zone 0 (Internal) and Zone 1 (Coupled):
+        // Sorted primarily by owner cell for cache locality in flux loops,
+        // then by neigh for deterministic ordering.
         if (mp.face_owner[a_sz] != mp.face_owner[b_sz]) {
             return mp.face_owner[a_sz] < mp.face_owner[b_sz];
         }
@@ -540,11 +552,24 @@ void apply_cell_permutation(MeshPart& mp, const std::vector<LocalIndex>& new2old
         }
     }
 
+    // 7. Calculate 3-Zone Face Boundaries
+    LocalIndex n_internal_faces = 0;
     LocalIndex n_inner_faces = 0;
+
     for (LocalIndex f = 0; f < mp.n_faces; ++f) {
-        if (mp.face_neigh[static_cast<std::size_t>(f)] >= 0) ++n_inner_faces;
-        else break;
+        const LocalIndex neigh = mp.face_neigh[static_cast<std::size_t>(f)];
+        if (neigh >= 0) {
+            ++n_inner_faces;
+            if (neigh < n_own) {
+                assert(n_inner_faces == n_internal_faces + 1); // Zone 0 must be strictly contiguous
+                ++n_internal_faces;
+            }
+        } else {
+            break; // Reached Zone 2 (Boundary faces)
+        }
     }
+
+    mp.n_internal_faces = n_internal_faces;
     mp.n_inner_faces = n_inner_faces;
 }
 

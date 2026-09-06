@@ -934,15 +934,15 @@ void migrate_local_mesh(
     MPI_Allreduce(loc_bbox_hi, mp.bbox_hi, 3, MPI_DOUBLE, MPI_MAX, comm);
 
     // Global counts
-    GlobalIndex local_counts[2] = {
-        static_cast<GlobalIndex>(mp.n_faces),
-        static_cast<GlobalIndex>(total_local_bfaces)
+    std::int64_t local_counts[2] = {
+        static_cast<std::int64_t>(mp.n_faces),
+        static_cast<std::int64_t>(total_local_bfaces)
     };
-    GlobalIndex global_counts[2] = {0, 0};
+    std::int64_t global_counts[2] = {0, 0};
     MPI_Allreduce(local_counts, global_counts, 2, MPI_INT64_T, MPI_SUM, comm);
 
-    mp.n_faces_g = global_counts[0] - pr.global_edge_cut;
-    mp.n_bfaces_g = global_counts[1];
+    mp.n_faces_g = static_cast<GlobalIndex>(global_counts[0]) - pr.global_edge_cut;
+    mp.n_bfaces_g = static_cast<GlobalIndex>(global_counts[1]);
 
     std::string err;
     if (!meshpart_sane(mp, err)) {

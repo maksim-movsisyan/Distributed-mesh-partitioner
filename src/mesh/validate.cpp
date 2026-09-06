@@ -107,9 +107,16 @@ void validate_and_log_meshpart(const MeshPart& mp) {
     }
 
     // -------------------------------------------------------------------------
-    // 3. Validate Face Partitioning, Sorting & Geometric Normals
+    // 3. Validate Face Partitioning, 3-Zone Sorting & Geometric Normals
     // -------------------------------------------------------------------------
     const auto n_patches_sz = mp.patches.size();
+
+    // Invariant check on zone boundaries
+    if (mp.n_internal_faces < 0 || mp.n_internal_faces > mp.n_inner_faces || mp.n_inner_faces > mp.n_faces) {
+        err << "Invalid face zone partitions: n_internal (" << mp.n_internal_faces
+            << ") > n_inner (" << mp.n_inner_faces << ") or > n_faces (" << mp.n_faces << ")\n";
+        local_ok = false;
+    }
 
     for (LocalIndex f = 0; f < mp.n_faces && local_ok; ++f) {
         const auto f_sz = static_cast<std::size_t>(f);
@@ -123,40 +130,78 @@ void validate_and_log_meshpart(const MeshPart& mp) {
             break;
         }
 
-        // Section A: Interior faces [0, n_inner_faces)
-        if (f < mp.n_inner_faces) {
-            if (v == kInvalidLocal || v < 0 || v >= mp.n_cells) {
-                err << "Interior face " << f << " has invalid neighbor index: " << v << "\n";
+        // =====================================================================
+        // Zone 0: Pure Internal Faces [0, n_internal_faces)
+        // Contract: u < n_own, v < n_own (strictly owned neighbor, no halo needed)
+        // =====================================================================
+        if (f < mp.n_internal_faces) {
+            if (v == kInvalidLocal || v < 0 || v >= mp.n_own) {
+                err << "Zone 0 (Pure Internal) face " << f 
+                    << " has invalid or non-owned neighbor index: " << v 
+                    << " (expected 0 <= v < " << mp.n_own << ")\n";
                 local_ok = false;
                 break;
             }
             if (p != kInvalidPatch) {
-                err << "Interior face " << f << " has non-null patch ID: " << p << "\n";
+                err << "Zone 0 face " << f << " has non-null patch ID: " << p << "\n";
                 local_ok = false;
                 break;
             }
 
-            // Monotonic sort check: (owner, neigh)
-            if (f + 1 < mp.n_inner_faces) {
+            // Monotonic sort check within Zone 0: (owner, neigh)
+            if (f + 1 < mp.n_internal_faces) {
                 const auto next_sz = static_cast<std::size_t>(f + 1);
                 const LocalIndex u_next = mp.face_owner[next_sz];
                 const LocalIndex v_next = mp.face_neigh[next_sz];
                 if (u > u_next || (u == u_next && v >= v_next)) {
-                    err << "Interior faces are not sorted by (owner, neigh) at index " << f << "\n";
+                    err << "Zone 0 (Pure Internal) faces are not sorted by (owner, neigh) at index " << f << "\n";
                     local_ok = false;
                     break;
                 }
             }
         }
-        // Section B: Boundary faces [n_inner_faces, n_faces)
+        // =====================================================================
+        // Zone 1: Inter-rank / Coupled Faces [n_internal_faces, n_inner_faces)
+        // Contract: u < n_own, v >= n_own (neighbor is strictly a ghost cell)
+        // =====================================================================
+        else if (f < mp.n_inner_faces) {
+            if (v < mp.n_own || v >= mp.n_cells) {
+                err << "Zone 1 (Coupled) face " << f 
+                    << " has invalid or non-ghost neighbor index: " << v 
+                    << " (expected " << mp.n_own << " <= v < " << mp.n_cells << ")\n";
+                local_ok = false;
+                break;
+            }
+            if (p != kInvalidPatch) {
+                err << "Zone 1 face " << f << " has non-null patch ID: " << p << "\n";
+                local_ok = false;
+                break;
+            }
+
+            // Monotonic sort check within Zone 1: (owner, neigh)
+            if (f + 1 < mp.n_inner_faces) {
+                const auto next_sz = static_cast<std::size_t>(f + 1);
+                const LocalIndex u_next = mp.face_owner[next_sz];
+                const LocalIndex v_next = mp.face_neigh[next_sz];
+                if (u > u_next || (u == u_next && v >= v_next)) {
+                    err << "Zone 1 (Coupled) faces are not sorted by (owner, neigh) at index " << f << "\n";
+                    local_ok = false;
+                    break;
+                }
+            }
+        }
+        // =====================================================================
+        // Zone 2: Boundary Faces [n_inner_faces, n_faces)
+        // Contract: v == kInvalidLocal, p in [0, n_patches)
+        // =====================================================================
         else {
             if (v != kInvalidLocal) {
-                err << "Boundary face " << f << " has non-null neighbor: " << v << "\n";
+                err << "Zone 2 (Boundary) face " << f << " has non-null neighbor: " << v << "\n";
                 local_ok = false;
                 break;
             }
             if (p == kInvalidPatch || static_cast<std::size_t>(p) >= n_patches_sz) {
-                err << "Boundary face " << f << " has invalid patch ID: " << p << "\n";
+                err << "Zone 2 face " << f << " has invalid patch ID: " << p << "\n";
                 local_ok = false;
                 break;
             }
@@ -167,7 +212,7 @@ void validate_and_log_meshpart(const MeshPart& mp) {
                 const PatchId    p_next = mp.face_patch[next_sz];
                 const LocalIndex u_next = mp.face_owner[next_sz];
                 if (p > p_next || (p == p_next && u > u_next)) {
-                    err << "Boundary faces are not sorted by (patch_id, owner) at index " << f << "\n";
+                    err << "Zone 2 faces are not sorted by (patch_id, owner) at index " << f << "\n";
                     local_ok = false;
                     break;
                 }

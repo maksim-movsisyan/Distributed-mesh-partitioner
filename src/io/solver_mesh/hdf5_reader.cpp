@@ -10,6 +10,7 @@
 #include <sstream>
 #include <type_traits>
 #include <vector>
+#include <cassert>
 
 #include "cfd/core/types.hpp"
 #include "cfd/mpi/log.hpp"
@@ -432,15 +433,26 @@ void import_mesh_hdf5(mesh::MeshPart& mp, const std::string& filepath, MPI_Comm 
         read_dataset_1d(g_patch, "patch_faces", patch_faces_offset_pos, my_patch_faces_cnt, mp.patch_faces.data(), dxpl);
     }
 
-    // 10. Update last field - n_inner faces
+    // 10. Reconstruct 3-zone face partition boundaries (n_internal_faces & n_inner_faces)
+    LocalIndex n_internal = 0;
     LocalIndex n_inner = 0;
+
     for (LocalIndex f = 0; f < mp.n_faces; ++f) {
-        if (mp.face_neigh[static_cast<std::size_t>(f)] >= 0) {
+        const LocalIndex neigh = mp.face_neigh[static_cast<std::size_t>(f)];
+
+        if (neigh >= 0) {
             ++n_inner;
+            if (neigh < mp.n_own) {
+                // Invariant: Zone 0 (Pure Internal) must strictly precede Zone 1 (Coupled)
+                assert(n_inner == n_internal + 1 && "Corrupted face layout: Zone 0 must be contiguous at the start");
+                ++n_internal;
+            }
         } else {
-            break;
+            break; // Reached Zone 2 (Boundary faces with neigh == -1)
         }
     }
+
+    mp.n_internal_faces = n_internal;
     mp.n_inner_faces = n_inner;
 
     if (rank == 0) {
