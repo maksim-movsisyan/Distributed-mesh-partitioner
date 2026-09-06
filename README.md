@@ -172,8 +172,16 @@ Data of rank $r$ with topological partition ID $p = \text{rank2part}[r]$ occupie
 
 ---
 
+## Known Limitations & Bugs
+
+* **Multi-Body Interfaces (`GRID_CONNECTIVITY`):** If the input mesh contains multiple bodies with connected interfaces, the partitioner will import the interface patch metadata (the patch ID and name will exist in the output HDF5), but **zero faces** will be assigned to it. This happens because the preprocessor treats interface faces as regular interior elements during the boundary audit, leaving the corresponding patch face list empty. 
+
+---
+
 ## Status
 
-- Fully verified on unstructured hexahedral, tetrahedral, and prism meshes on 1, 2, 4, 8+ MPI ranks.
+- Fully verified on unstructured mixed, hexahedral, tetrahedral, and prism meshes on 1, 2, 4, 8+ MPI ranks.
 - Zero-copy halo exchange communication handshake verified across all neighboring partitions.
 - Exact total domain volume and strict outward face normal contracts confirmed.
+
+
