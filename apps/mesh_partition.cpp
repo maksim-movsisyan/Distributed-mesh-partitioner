@@ -133,25 +133,6 @@ int main(int argc, char** argv) {
     //    key, global 1-based element id). NOTE: surface elements are
     //    block-split independently PER SECTION, so this slice is unrelated
     //    to the cell/node ownership above.
-    //
-    // PERF WARNING: boundary condition metadata (cg_boco_info/cg_boco_read/
-    // cg_goto+cg_famname_read) is read independently and redundantly by
-    // EVERY rank. The tree traversal in cg_goto/cg_famname_read (not
-    // cg_boco_read itself) is the likely cost driver at scale.
-    // Known bottleneck on Lustre/GPFS-style filesystems once nprocs is in
-    // the many-hundreds/thousands range (small independent metadata
-    // requests hammer the MDS). Not an issue at current scale.
-    //
-    // Fix: read once on rank 0, MPI_Bcast the packed BCMeta list to all
-    // ranks. m->bcs stays a replicated vector<BCMeta> on every rank either
-    // way, so this is a drop-in internal change — no RawMesh/API changes
-    // needed.
-    //
-    // CAVEAT before implementing: fatal()/check() currently run identically
-    // on all ranks, so a malformed file aborts symmetrically everywhere.
-    // After rank-0-only reading, verify fatal() does a collective
-    // MPI_Abort(comm, ...) — otherwise a bad file kills only rank 0 and
-    // every other rank hangs forever on the Bcast.
     cfd::mesh::RawMesh m = cfd::io::cgns::read_cgns_parallel(in, MPI_COMM_WORLD);
 
 
@@ -172,12 +153,13 @@ int main(int argc, char** argv) {
     //
     // Algorithm Overview (2-Phase Rendezvous / Owner-Compute Scheme):
     //
-    //  Phase 1: Generation & Geometric Rendezvous Dispatch
+    //  Phase 1: Generation & Hash-Based Rendezvous Dispatch
     //   - Every rank iterates over its local volume cells, extracts canonical
     //     sub-faces using CGNS lookup tables, and builds a sorted 4-node `FaceKey`.
     //   - Every rank takes its local slice of `surf_elems` (containing BC PatchIds).
-    //   - A rendezvous destination rank is computed for every face via
-    //     `find_owner_rank(min(FaceKey.nodes), m.node_displ)`.
+    //   - A rendezvous destination rank is computed deterministically via
+    //     `FaceKeyHash(FaceKey) % nprocs`, guaranteeing uniform O(N_faces / P) memory
+    //     and network distribution across all ranks (prevents incast / skew on rank 0).
     //   - All half-faces and surface elements are packed and dispatched using
     //     a single `MPI_Alltoallv` exchange.
     //

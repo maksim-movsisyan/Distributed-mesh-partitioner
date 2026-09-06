@@ -50,7 +50,7 @@ struct BuildFacesResult {
 
 // Distributed construction of face-cell connectivity and dual graph CSR.
 // Algorithmic steps:
-//  1. Generate local half-faces and dispatch to rendezvous ranks owning min(FaceKey).
+//  1. Generate local half-faces and dispatch to rendezvous ranks via FaceKeyHash % nprocs.
 //  2. Deduplicate on rendezvous ranks, match interior pairs and match boundary faces
 //     against RawMesh::surf_elems.
 //  3. Dispatch matched faces to the rank owning cell_a; assemble DualGraph and FaceRec list.

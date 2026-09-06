@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "cfd/core/types.hpp"
+#include "cfd/mesh/cgnstables.hpp"
 #include "cfd/mpi/log.hpp"
 #include "cfd/mpi/mpi_util.hpp"
 
@@ -20,7 +21,7 @@ namespace {
 // HPC Communication Buffers & POD Messages
 // =============================================================================
 
-// Phase 1 message: Sent to the rendezvous owner of min(FaceKey.v[0])
+// Phase 1 message: Sent to the rendezvous owner computed via FaceKeyHash
 struct alignas(8) HalfFaceMsg {
     FaceKey key;
     GlobalIndex cell_id = kInvalidGlobalIndex; // Volume cell GID (or kInvalidGlobalIndex if SurfElem)
@@ -45,23 +46,26 @@ inline int find_owner_rank(GlobalIndex gid, const std::vector<GlobalIndex>& disp
     return static_cast<int>(std::distance(displ.begin(), it) - 1);
 }
 
+// Compute deterministic rendezvous rank via FNV-1a FaceKeyHash
+inline int find_rendezvous_rank(const FaceKey& key, int nprocs) noexcept {
+    return static_cast<int>(FaceKeyHash{}(key) % static_cast<std::size_t>(nprocs));
+}
+
 // Construct canonical sorted FaceKey using fixed 4-slot array with -1 sentinel padding
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Warray-bounds"
-
 inline FaceKey make_sorted_face_key(const GlobalIndex* raw_nodes, int node_count) noexcept {
-    FaceKey k{};
-    for (int i = 0; i < node_count; ++i) {
-        k.v[static_cast<std::size_t>(i)] = raw_nodes[static_cast<std::size_t>(i)];
+    FaceKey k{}; // Initializes all slots to -1 (kInvalidGlobalIndex)
+    const int count = std::min(node_count, 4);
+    for (int i = 0; i < count; ++i) {
+        k.v[static_cast<std::size_t>(i)] = raw_nodes[i];
     }
 
-    if (node_count > 1) {
-        const std::size_t safe_count = std::min(static_cast<std::size_t>(node_count), k.v.size());
-        std::sort(k.v.begin(), k.v.begin() + safe_count);
+    if (count > 1) {
+        std::sort(k.v.begin(), k.v.begin() + count);
     }
     return k;
 }
-
 #pragma GCC diagnostic pop
 
 } // namespace
@@ -72,12 +76,13 @@ BuildFacesResult build_faces(const RawMesh& m) {
     const int rank = m.rank;
     const MPI_Comm comm = m.comm;
 
-    // get loca number of cells
+    // get local number of cells
     const LocalIndex n_loc_cells = m.n_local_cells();
 
 
+    
     // -------------------------------------------------------------------------
-    // Phase 1: Generate Half-Faces & Surface Elements -> Rendezvous by min(node)
+    // Phase 1: Generate Half-Faces & Surface Elements -> Rendezvous by FaceKeyHash
     // -------------------------------------------------------------------------
     std::vector<int> p1_send_counts(static_cast<std::size_t>(nprocs), 0);
 
@@ -113,8 +118,8 @@ BuildFacesResult build_faces(const RawMesh& m) {
             // creating face key
             const FaceKey key = make_sorted_face_key(fnodes.data(), static_cast<int>(fn_count));
 
-            // find destination of face (owner rank, choosen by initial contiguous distribution)
-            const int dest = find_owner_rank(key.v[0], m.node_displ);
+            // find rendezvous destination of face via hash
+            const int dest = find_rendezvous_rank(key, nprocs);
 
             // increase number of faces, owned by each rank
             ++p1_send_counts[static_cast<std::size_t>(dest)];
@@ -126,7 +131,7 @@ BuildFacesResult build_faces(const RawMesh& m) {
 
     // Pass 1.2: Count send items for surface elements
     for (const auto& surf : m.surf_elems) {
-        const int dest = find_owner_rank(surf.key.v[0], m.node_displ);
+        const int dest = find_rendezvous_rank(surf.key, nprocs);
         ++p1_send_counts[static_cast<std::size_t>(dest)];
     }
 
@@ -167,14 +172,14 @@ BuildFacesResult build_faces(const RawMesh& m) {
             // creating face key
             const FaceKey key = make_sorted_face_key(fnodes.data(), static_cast<int>(fn_count));
 
-            // find destination of face
-            const int dest = find_owner_rank(key.v[0], m.node_displ);
+            // find rendezvous destination of face
+            const int dest = find_rendezvous_rank(key, nprocs);
 
             // write data in buffer
             p1_send_buf[static_cast<std::size_t>(p1_cursors[static_cast<std::size_t>(dest)]++)] = 
-            HalfFaceMsg{
-                key, cell_gid, kInvalidPatchId, static_cast<std::uint8_t>(f), 0
-            };
+                HalfFaceMsg{
+                    key, cell_gid, kInvalidPatchId, static_cast<std::uint8_t>(f), 0
+                };
         } // end loop over cell faces
 
         // increase offsets
@@ -183,13 +188,13 @@ BuildFacesResult build_faces(const RawMesh& m) {
 
     // Fill Phase 1 send buffer (Surface elements)
     for (const auto& surf : m.surf_elems) {
-        // find owner rank
-        const int dest = find_owner_rank(surf.key.v[0], m.node_displ);
+        // find rendezvous rank
+        const int dest = find_rendezvous_rank(surf.key, nprocs);
 
         p1_send_buf[static_cast<std::size_t>(p1_cursors[static_cast<std::size_t>(dest)]++)] =
             HalfFaceMsg{
-            surf.key, kInvalidGlobalIndex, surf.patch, 0, 1
-        };
+                surf.key, kInvalidGlobalIndex, surf.patch, 0, 1
+            };
     }
 
 
@@ -219,7 +224,7 @@ BuildFacesResult build_faces(const RawMesh& m) {
         int rank_b = -1;
     };
     std::vector<MatchedFace> matched_faces;
-    matched_faces.reserve(p1_recv_buf.size() / 2);
+    matched_faces.reserve(p1_recv_buf.size());
 
     const std::size_t total_recv = p1_recv_buf.size();
     // loop over all received faces
@@ -304,15 +309,15 @@ BuildFacesResult build_faces(const RawMesh& m) {
         p2_edge_sdispls[k + 1] = p2_edge_sdispls[k] + p2_edge_counts[k];
     }
 
-    std::size_t total_sfaces = static_cast<std::size_t>(p2_face_sdispls[static_cast<std::size_t>(nprocs)]);
-    std::size_t total_sedges = static_cast<std::size_t>(p2_edge_sdispls[static_cast<std::size_t>(nprocs)]);
+    const std::size_t total_sfaces = static_cast<std::size_t>(p2_face_sdispls[static_cast<std::size_t>(nprocs)]);
+    const std::size_t total_sedges = static_cast<std::size_t>(p2_edge_sdispls[static_cast<std::size_t>(nprocs)]);
 
     std::vector<FaceRec> p2_face_send(total_sfaces);
     std::vector<DualEdgeMsg> p2_edge_send(total_sedges);
     std::vector<int> p2_face_cursors = p2_face_sdispls;
     std::vector<int> p2_edge_cursors = p2_edge_sdispls;
 
-    // loop over all faces that I own (by node-based distribution above)
+    // loop over all faces that I own in rendezvous phase
     for (const auto& mf : matched_faces) {
         p2_face_send[static_cast<std::size_t>(p2_face_cursors[static_cast<std::size_t>(mf.rank_a)]++)] = mf.rec;
         if (mf.rank_b != -1 && mf.rank_a != mf.rank_b) {
@@ -324,8 +329,7 @@ BuildFacesResult build_faces(const RawMesh& m) {
     matched_faces.clear();
     matched_faces.shrink_to_fit();
 
-    // perform data exchange, after each step every rank get 
-    // it's own faces and face edges to build dual graph
+    // perform data exchange: every rank receives its own faces and remote back-edges
     std::vector<FaceRec> local_faces;
     std::vector<DualEdgeMsg> remote_edges;
     mpi::alltoallv_packed(comm, nprocs, p2_face_counts, p2_face_send, local_faces);
@@ -363,6 +367,7 @@ BuildFacesResult build_faces(const RawMesh& m) {
             // If cell_b is also local, add edge cell_b -> cell_a immediately
             if (f.cell_b >= my_cell_start && f.cell_b < my_cell_end) {
                 const auto v = static_cast<LocalIndex>(f.cell_b - my_cell_start);
+                assert(v >= 0 && v < n_loc_cells);
                 ++deg[static_cast<std::size_t>(v)];
             }
         } else {
@@ -431,10 +436,10 @@ BuildFacesResult build_faces(const RawMesh& m) {
     result.stats.n_dg_edges = static_cast<GlobalIndex>(global_stats[3]);
 
     mpi::log_stat("INFO[Faces]: Total face count=%lld, Boundary face count=%lld, Interior face count=%lld", 
-                    static_cast<int64_t>(result.stats.n_faces_g), 
-                    static_cast<int64_t>(result.stats.n_bfaces_g), 
-                    static_cast<int64_t>(result.stats.n_ifaces_g));
-    mpi::log_stat("INFO[Dual Graph]: Total edges=%lld", static_cast<int64_t>(result.stats.n_dg_edges));
+                  static_cast<long long>(result.stats.n_faces_g), 
+                  static_cast<long long>(result.stats.n_bfaces_g), 
+                  static_cast<long long>(result.stats.n_ifaces_g));
+    mpi::log_stat("INFO[Dual Graph]: Total edges=%lld", static_cast<long long>(result.stats.n_dg_edges));
 
     return result;
 }
