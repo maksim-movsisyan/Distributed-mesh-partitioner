@@ -1,13 +1,12 @@
 // Parallel CGNS reading via PCGNS (cgp_* on top of parallel HDF5).
 //
-// Supported: 1 base, 1 zone (Unstructured), per-type element sections without
-// MIXED: TETRA_4, PYRA_5, PENTA_6, HEXA_8 (volume) + TRI_3, QUAD_4 (boundary,
-// for BCs). BAR_* are skipped. BCs: ZoneBC with PointList/PointRange (GridLocation
+// Supported: 1 base, 1 zone (Unstructured), section element types:
+// MIXED, TETRA_4, PYRA_5, PENTA_6, HEXA_8 (volume) + MIXED, TRI_3, QUAD_4 (boundary,
+// for BCs). BCs: ZoneBC with PointList/PointRange (GridLocation
 // = FaceCenter); the name is the FamilyName when present, else the BC node name.
 #pragma once
 
 #include <cstdint>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -17,6 +16,7 @@
 #include <mpi.h>
 
 #include "cfd/mesh/raw_mesh.hpp"
+#include "cfd/mpi/log.hpp"
 
 namespace cfd::io::cgns {
 
@@ -31,8 +31,7 @@ using PatchId = std::int32_t;
 inline constexpr PatchId kInvalidPatchId = -1;
 
 
-
-inline void check(int status, std::string_view operation) {
+inline void check(int status, std::string_view operation, MPI_Comm comm) {
     if (status == CG_OK) { return; }
 
     std::string message{operation};
@@ -43,8 +42,9 @@ inline void check(int status, std::string_view operation) {
         message += cgns_message;
     }
 
-    throw std::runtime_error(message);
+    mpi::fatal(comm, message);
 }
+
 
 
 class File final {
@@ -52,12 +52,12 @@ public:
     explicit File(std::string path, MPI_Comm comm = MPI_COMM_WORLD) 
         : path_(std::move(path)), comm_(comm) {
         if (path_.empty()) {
-            throw std::invalid_argument{"CGNS file path is empty"};
+            mpi::fatal(comm_, "CGNS file path is empty");
         }
 
         // Configure communicator for parallel HDF5/PCGNS
-        check(cgp_mpi_comm(comm_), "cgp_mpi_comm");
-        check(cgp_open(path_.c_str(), CG_MODE_READ, &id_), "cgp_open");
+        check(cgp_mpi_comm(comm_), "cgp_mpi_comm", comm_);
+        check(cgp_open(path_.c_str(), CG_MODE_READ, &id_), "cgp_open", comm_);
     }
 
     ~File() noexcept { if (is_open()) static_cast<void>(cgp_close(id_)); }
@@ -68,15 +68,17 @@ public:
     File(File&& o) noexcept 
         : path_(std::move(o.path_)), id_(o.id_), comm_(o.comm_) {
         o.id_ = invalid_id;
+        o.comm_ = MPI_COMM_NULL;
     }
 
     File& operator=(File&& o) noexcept {
         if (this != &o) {
-             if (is_open()) static_cast<void>(cgp_close(id_));
+            if (is_open()) static_cast<void>(cgp_close(id_));
             path_ = std::move(o.path_);
             id_ = o.id_;
             comm_ = o.comm_;
             o.id_ = invalid_id;
+            o.comm_ = MPI_COMM_NULL;
         }
         return *this;
     }
@@ -93,7 +95,7 @@ public:
         id_ = invalid_id;
 
         // close file
-        check(cgp_close(id_to_close), "cgp_close");
+        check(cgp_close(id_to_close), "cgp_close", comm_);
     }
 
 private:
@@ -104,13 +106,7 @@ private:
     MPI_Comm comm_{MPI_COMM_NULL};
 };
 
-// Parallel read (all ranks of the communicator). On file incompatibility it
-// prints an error and returns nullptr on every rank.
+// Parallel read (all ranks of the communicator). Aborts via cfd::mpi::fatal on error.
 mesh::RawMesh read_cgns_parallel(const std::string& path, MPI_Comm comm = MPI_COMM_WORLD);
-
-// Fetch node coordinates by global ids (the node owner answers from its own
-// slice). Returns interleaved xyz triples (size = 3 * node_gids.size()) 
-// in input-list order (duplicates allowed).
-//std::vector<double> fetch_coords(RawMesh& m, const std::vector<GlobalIndex>& node_gids);
 
 } //namespace cfd::io::cgns 
