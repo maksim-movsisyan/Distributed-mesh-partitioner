@@ -161,6 +161,7 @@ add_library(
         src/mesh/bc_config.cpp
         src/mesh/validate.cpp
         src/mesh/aux_connectivity.cpp
+        src/mesh/aux_geometry.cpp
 )
 
 target_include_directories(
