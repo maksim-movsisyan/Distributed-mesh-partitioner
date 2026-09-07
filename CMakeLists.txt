@@ -160,6 +160,7 @@ add_library(
         src/mesh/reorder.cpp
         src/mesh/bc_config.cpp
         src/mesh/validate.cpp
+        src/mesh/aux_connectivity.cpp
 )
 
 target_include_directories(

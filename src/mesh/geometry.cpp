@@ -9,57 +9,146 @@
 #include <sstream>
 
 #include "cfd/mpi/log.hpp"
+#include "cfd/mesh/cgnstables.hpp"
 
 namespace cfd::mesh {
 
-[[nodiscard]] double poly_cell_volume(CellType t, 
-                                      const double* x, 
-                                      const double* y, 
-                                      const double* z) noexcept {
-    // cast cell type
-    const auto ti = static_cast<std::size_t>(t);
+namespace {
+struct CellMetrics {
+    double volume{0.0};
+    double cx{0.0};
+    double cy{0.0};
+    double cz{0.0};
+};
 
-    // get number of cell faces
-    const auto num_faces = static_cast<std::size_t>(kFacesPerType[ti]);
+[[nodiscard]] CellMetrics compute_poly_cell_metrics(CellType t,
+                                                    const double* x,
+                                                    const double* y,
+                                                    const double* z) noexcept {
+    const std::size_t ti = static_cast<std::size_t>(t);
+    const std::size_t nnodes = static_cast<std::size_t>(kNodesPerType[ti]);
+    const std::size_t num_faces = static_cast<std::size_t>(kFacesPerType[ti]);
 
-    double volume = 0.0;
+    // finding geometric center
+    double sum_x = 0.0, sum_y = 0.0, sum_z = 0.0;
+    for (std::size_t i = 0; i < nnodes; ++i) {
+        sum_x += x[i];
+        sum_y += y[i];
+        sum_z += z[i];
+    }
+    const double inv_nnodes = 1.0 / static_cast<double>(nnodes);
+    const double x0 = sum_x * inv_nnodes;
+    const double y0 = sum_y * inv_nnodes;
+    const double z0 = sum_z * inv_nnodes;
 
-    // loop over cell faces
+    double total_vol = 0.0;
+    double mx = 0.0, my = 0.0, mz = 0.0;
+
+    // loop over all cell faces
     for (std::size_t f = 0; f < num_faces; ++f) {
-        // get number of face nodes
-        const auto nn = static_cast<std::size_t>(kFaceNodes[ti][f]);
+        const std::size_t nn = static_cast<std::size_t>(kFaceNodes[ti][f]);
 
-        double S[3] = {0.0, 0.0, 0.0};
-        double c_sum[3] = {0.0, 0.0, 0.0};
+        if (nn == 3) {
+            // if face is triangel => centroid == geometric center:
+            const std::size_t i0 = static_cast<std::size_t>(kFaceTable[ti][f][0]);
+            const std::size_t i1 = static_cast<std::size_t>(kFaceTable[ti][f][1]);
+            const std::size_t i2 = static_cast<std::size_t>(kFaceTable[ti][f][2]);
 
-        // loop over face nodes
-        for (std::size_t j = 0; j < nn; ++j) {
-            const std::size_t next_j = (j + 1 == nn) ? 0 : (j + 1);
+            const double p0x = x[i0], p0y = y[i0], p0z = z[i0];
+            const double p1x = x[i1], p1y = y[i1], p1z = z[i1];
+            const double p2x = x[i2], p2y = y[i2], p2z = z[i2];
 
-            // get node indices (local in cell nodes)
-            const auto idx_a = static_cast<std::size_t>(kFaceTable[ti][f][j]);
-            const auto idx_b = static_cast<std::size_t>(kFaceTable[ti][f][next_j]);
+            // triangle area vector: 0.5 * (p1 - p0) x (p2 - p0)
+            const double e1x = p1x - p0x, e1y = p1y - p0y, e1z = p1z - p0z;
+            const double e2x = p2x - p0x, e2y = p2y - p0y, e2z = p2z - p0z;
 
-            const double ax = x[idx_a], ay = y[idx_a], az = z[idx_a];
-            const double bx = x[idx_b], by = y[idx_b], bz = z[idx_b];
+            const double Sx = 0.5 * (e1y * e2z - e1z * e2y);
+            const double Sy = 0.5 * (e1z * e2x - e1x * e2z);
+            const double Sz = 0.5 * (e1x * e2y - e1y * e2x);
 
-            // Cross product: a x b
-            S[0] += ay * bz - az * by;
-            S[1] += az * bx - ax * bz;
-            S[2] += ax * by - ay * bx;
+            // tetrahedron singed volume (always positive, because S is outward vector): (1/3) * S · (p0 - x0)
+            const double v_tet = (1.0 / 3.0) * (Sx * (p0x - x0) + 
+                                                Sy * (p0y - y0) + 
+                                                Sz * (p0z - z0));
 
-            c_sum[0] += ax;
-            c_sum[1] += ay;
-            c_sum[2] += az;
-        } // end loop over face nodes
+            // tetrahedron centorid == geometric center
+            const double c_tet_x = 0.25 * (x0 + p0x + p1x + p2x);
+            const double c_tet_y = 0.25 * (y0 + p0y + p1y + p2y);
+            const double c_tet_z = 0.25 * (z0 + p0z + p1z + p2z);
 
-        // Divergence theorem: (1/3) * (S/2) · (c_sum/nn) = (S · c_sum) / (6 * nn)
-        volume += (S[0] * c_sum[0] + S[1] * c_sum[1] + S[2] * c_sum[2]) / 
-                  (6.0 * static_cast<double>(nn));
-    } // end loop over cell faces
+            total_vol += v_tet;
+            mx += v_tet * c_tet_x;
+            my += v_tet * c_tet_y;
+            mz += v_tet * c_tet_z;
+        } else {
+            // if face is general polyhedron => triangulation:
+            double f_sum_x = 0.0, f_sum_y = 0.0, f_sum_z = 0.0;
+            
+            // finding face geometric center (for triangulation)
+            for (std::size_t j = 0; j < nn; ++j) {
+                const std::size_t idx = static_cast<std::size_t>(kFaceTable[ti][f][j]);
+                f_sum_x += x[idx];
+                f_sum_y += y[idx];
+                f_sum_z += z[idx];
+            }
+            const double inv_nn = 1.0 / static_cast<double>(nn);
+            const double fc_x = f_sum_x * inv_nn;
+            const double fc_y = f_sum_y * inv_nn;
+            const double fc_z = f_sum_z * inv_nn;
 
-    return volume;
+            // loop over all face nodes
+            for (std::size_t j = 0; j < nn; ++j) {
+                const std::size_t next_j = (j + 1 == nn) ? 0 : (j + 1);
+
+                const std::size_t idx_a = static_cast<std::size_t>(kFaceTable[ti][f][j]);
+                const std::size_t idx_b = static_cast<std::size_t>(kFaceTable[ti][f][next_j]);
+
+                const double ax = x[idx_a], ay = y[idx_a], az = z[idx_a];
+                const double bx = x[idx_b], by = y[idx_b], bz = z[idx_b];
+
+                // Subtriangel area (fc, a, b): 0.5 * (a - fc) x (b - fc)
+                const double e1x = ax - fc_x, e1y = ay - fc_y, e1z = az - fc_z;
+                const double e2x = bx - fc_x, e2y = by - fc_y, e2z = bz - fc_z;
+
+                const double tri_Sx = 0.5 * (e1y * e2z - e1z * e2y);
+                const double tri_Sy = 0.5 * (e1z * e2x - e1x * e2z);
+                const double tri_Sz = 0.5 * (e1x * e2y - e1y * e2x);
+
+                // Subtetrahedron volume (x0, fc, a, b)
+                const double v_tet = (1.0 / 3.0) * (tri_Sx * (fc_x - x0) + 
+                                                    tri_Sy * (fc_y - y0) + 
+                                                    tri_Sz * (fc_z - z0));
+
+                const double c_tet_x = 0.25 * (x0 + fc_x + ax + bx);
+                const double c_tet_y = 0.25 * (y0 + fc_y + ay + by);
+                const double c_tet_z = 0.25 * (z0 + fc_z + az + bz);
+
+                total_vol += v_tet;
+                mx += v_tet * c_tet_x;
+                my += v_tet * c_tet_y;
+                mz += v_tet * c_tet_z;
+            }
+        }
+    }
+
+    if (total_vol > 1e-15) {
+        const double inv_v = 1.0 / total_vol;
+        return {total_vol, mx * inv_v, my * inv_v, mz * inv_v};
+    }
+
+    return {total_vol, x0, y0, z0};
 }
+
+[[nodiscard]] inline double poly_cell_volume(CellType t,
+                                             const double* x,
+                                             const double* y,
+                                             const double* z) noexcept {
+    return compute_poly_cell_metrics(t, x, y, z).volume;
+}
+
+}
+
+
 
 bool validate_face_tables() {
     // idial reference cells ("unit cells")
@@ -210,8 +299,8 @@ bool validate_face_tables() {
 }
 
 void compute_mesh_geometry(MeshPart& mp) {
-    const auto n_cells_sz = static_cast<std::size_t>(mp.n_cells);
-    const auto n_faces_sz = static_cast<std::size_t>(mp.n_faces);
+    const std::size_t n_cells_sz = static_cast<std::size_t>(mp.n_cells);
+    const std::size_t n_faces_sz = static_cast<std::size_t>(mp.n_faces);
 
     // -------------------------------------------------------------------------
     // Step 1: Pre-allocate SoA Geometric Arrays
@@ -230,7 +319,7 @@ void compute_mesh_geometry(MeshPart& mp) {
     mp.face_area.resize(n_faces_sz);
 
     // -------------------------------------------------------------------------
-    // Step 2: Compute Cell Metrics & Strict Positive Volume Validation
+    // Step 2: Compute Cell Metrics via Tetrahedralization
     // -------------------------------------------------------------------------
     double min_local_vol = std::numeric_limits<double>::max();
     double max_local_vol = -std::numeric_limits<double>::max();
@@ -241,126 +330,141 @@ void compute_mesh_geometry(MeshPart& mp) {
     double cell_z_buf[8];
 
     for (LocalIndex c = 0; c < mp.n_cells; ++c) {
-        const auto c_sz = static_cast<std::size_t>(c);
+        const std::size_t c_sz = static_cast<std::size_t>(c);
         const LocalIndex off_start = mp.cell_nodes_offsets[c_sz];
         const LocalIndex off_end   = mp.cell_nodes_offsets[c_sz + 1];
-        const auto nnodes = static_cast<std::size_t>(off_end - off_start);
+        const std::size_t nnodes = static_cast<std::size_t>(off_end - off_start);
         const CellType type = mp.cell_type[c_sz];
-
-        double sum_x = 0.0;
-        double sum_y = 0.0;
-        double sum_z = 0.0;
 
         for (std::size_t k = 0; k < nnodes; ++k) {
             const LocalIndex nid = mp.cell_nodes[static_cast<std::size_t>(off_start) + k];
-            const auto nid_sz = static_cast<std::size_t>(nid);
+            const std::size_t nid_sz = static_cast<std::size_t>(nid);
 
-            const double px = mp.node_x[nid_sz];
-            const double py = mp.node_y[nid_sz];
-            const double pz = mp.node_z[nid_sz];
-
-            cell_x_buf[k] = px;
-            cell_y_buf[k] = py;
-            cell_z_buf[k] = pz;
-
-            sum_x += px;
-            sum_y += py;
-            sum_z += pz;
+            cell_x_buf[k] = mp.node_x[nid_sz];
+            cell_y_buf[k] = mp.node_y[nid_sz];
+            cell_z_buf[k] = mp.node_z[nid_sz];
         }
 
-        const double inv_nn = 1.0 / static_cast<double>(nnodes);
-        mp.cell_centroid_x[c_sz] = sum_x * inv_nn;
-        mp.cell_centroid_y[c_sz] = sum_y * inv_nn;
-        mp.cell_centroid_z[c_sz] = sum_z * inv_nn;
-
-        const double vol = poly_cell_volume(type, cell_x_buf, cell_y_buf, cell_z_buf);
+        const CellMetrics metrics = compute_poly_cell_metrics(type, cell_x_buf, cell_y_buf, cell_z_buf);
 
         // Strict positive volume assertion
-        if (vol <= 1e-15) {
+        if (metrics.volume <= 1e-15) {
             std::stringstream ss;
             ss << "Degenerate/negative cell volume detected on Rank " << mp.rank
                << " (Local cell: " << c << ", Global GID: " << mp.cell_gid[c_sz]
-               << ", Type: " << cell_type_name(type) << ", Volume: " << vol << ")";
+               << ", Type: " << cell_type_name(type) << ", Volume: " << metrics.volume << ")";
             mpi::fatal(MPI_COMM_WORLD, ss.str());
         }
 
-        mp.cell_volume[c_sz] = vol;
+        mp.cell_centroid_x[c_sz] = metrics.cx;
+        mp.cell_centroid_y[c_sz] = metrics.cy;
+        mp.cell_centroid_z[c_sz] = metrics.cz;
+        mp.cell_volume[c_sz]     = metrics.volume;
 
         if (c < mp.n_own) {
-            min_local_vol = std::min(min_local_vol, vol);
-            max_local_vol = std::max(max_local_vol, vol);
-            total_local_vol += vol;
+            min_local_vol = std::min(min_local_vol, metrics.volume);
+            max_local_vol = std::max(max_local_vol, metrics.volume);
+            total_local_vol += metrics.volume;
         }
     }
 
     // -------------------------------------------------------------------------
-    // Step 3: Compute Face Metrics & Normal Vectors
+    // Step 3: Compute Face Metrics via Proper Triangulation
     // -------------------------------------------------------------------------
     double min_local_area = std::numeric_limits<double>::max();
     double max_local_area = -std::numeric_limits<double>::max();
 
     for (LocalIndex f = 0; f < mp.n_faces; ++f) {
-        const auto f_sz = static_cast<std::size_t>(f);
+        const std::size_t f_sz = static_cast<std::size_t>(f);
         const LocalIndex off_start = mp.face_nodes_offsets[f_sz];
         const LocalIndex off_end   = mp.face_nodes_offsets[f_sz + 1];
-        const auto nnodes = static_cast<std::size_t>(off_end - off_start);
+        const std::size_t nnodes = static_cast<std::size_t>(off_end - off_start);
 
-        double sum_x = 0.0;
-        double sum_y = 0.0;
-        double sum_z = 0.0;
-
-        double fx[4];
-        double fy[4];
-        double fz[4];
-
-        for (std::size_t k = 0; k < nnodes; ++k) {
-            const LocalIndex nid = mp.face_nodes[static_cast<std::size_t>(off_start) + k];
-            const auto nid_sz = static_cast<std::size_t>(nid);
-
-            fx[k] = mp.node_x[nid_sz];
-            fy[k] = mp.node_y[nid_sz];
-            fz[k] = mp.node_z[nid_sz];
-
-            sum_x += fx[k];
-            sum_y += fy[k];
-            sum_z += fz[k];
+        if (nnodes < 3) {
+            std::stringstream ss;
+            ss << "Face " << f << " has degenerate node count: " << static_cast<int>(nnodes);
+            mpi::fatal(MPI_COMM_WORLD, ss.str());
         }
 
-        const double inv_nn = 1.0 / static_cast<double>(nnodes);
-        const double fc_x = sum_x * inv_nn;
-        const double fc_y = sum_y * inv_nn;
-        const double fc_z = sum_z * inv_nn;
-
-        mp.face_centroid_x[f_sz] = fc_x;
-        mp.face_centroid_y[f_sz] = fc_y;
-        mp.face_centroid_z[f_sz] = fc_z;
-
-        // Compute unnormalized area vector (Right-hand rule outward normal)
-        double Sx = 0.0;
-        double Sy = 0.0;
-        double Sz = 0.0;
+        double Sx = 0.0, Sy = 0.0, Sz = 0.0;
+        double fc_x = 0.0, fc_y = 0.0, fc_z = 0.0;
 
         if (nnodes == 3) {
-            // Triangle: S = 0.5 * (v1 - v0) x (v2 - v0)
-            const double e1x = fx[1] - fx[0], e1y = fy[1] - fy[0], e1z = fz[1] - fz[0];
-            const double e2x = fx[2] - fx[0], e2y = fy[2] - fy[0], e2z = fz[2] - fz[0];
+            const std::size_t n0 = static_cast<std::size_t>(mp.face_nodes[static_cast<std::size_t>(off_start)]);
+            const std::size_t n1 = static_cast<std::size_t>(mp.face_nodes[static_cast<std::size_t>(off_start) + 1]);
+            const std::size_t n2 = static_cast<std::size_t>(mp.face_nodes[static_cast<std::size_t>(off_start) + 2]);
+
+            const double p0x = mp.node_x[n0], p0y = mp.node_y[n0], p0z = mp.node_z[n0];
+            const double p1x = mp.node_x[n1], p1y = mp.node_y[n1], p1z = mp.node_z[n1];
+            const double p2x = mp.node_x[n2], p2y = mp.node_y[n2], p2z = mp.node_z[n2];
+
+            const double e1x = p1x - p0x, e1y = p1y - p0y, e1z = p1z - p0z;
+            const double e2x = p2x - p0x, e2y = p2y - p0y, e2z = p2z - p0z;
 
             Sx = 0.5 * (e1y * e2z - e1z * e2y);
             Sy = 0.5 * (e1z * e2x - e1x * e2z);
             Sz = 0.5 * (e1x * e2y - e1y * e2x);
-        } else if (nnodes == 4) {
-            // Quad: S = 0.5 * (v2 - v0) x (v3 - v1) [Diagonal Cross Product]
-            const double d1x = fx[2] - fx[0], d1y = fy[2] - fy[0], d1z = fz[2] - fz[0];
-            const double d2x = fx[3] - fx[1], d2y = fy[3] - fy[1], d2z = fz[3] - fz[1];
 
-            Sx = 0.5 * (d1y * d2z - d1z * d2y);
-            Sy = 0.5 * (d1z * d2x - d1x * d2z);
-            Sz = 0.5 * (d1x * d2y - d1y * d2x);
-        } else {
-            std::stringstream ss;
-            ss << "Face " << f << " has unsupported node count: " << static_cast<int>(nnodes);
-            std::string result = ss.str(); 
-            mpi::fatal(MPI_COMM_WORLD, result);
+            fc_x = (p0x + p1x + p2x) / 3.0;
+            fc_y = (p0y + p1y + p2y) / 3.0;
+            fc_z = (p0z + p1z + p2z) / 3.0;
+        } else { 
+            double sum_x = 0.0, sum_y = 0.0, sum_z = 0.0;
+            for (std::size_t k = 0; k < nnodes; ++k) {
+                const std::size_t nid = static_cast<std::size_t>(mp.face_nodes[static_cast<std::size_t>(off_start) + k]);
+                sum_x += mp.node_x[nid];
+                sum_y += mp.node_y[nid];
+                sum_z += mp.node_z[nid];
+            }
+            const double inv_nn = 1.0 / static_cast<double>(nnodes);
+            const double f0_x = sum_x * inv_nn;
+            const double f0_y = sum_y * inv_nn;
+            const double f0_z = sum_z * inv_nn;
+
+            double weighted_cx = 0.0, weighted_cy = 0.0, weighted_cz = 0.0;
+            double total_sub_area = 0.0;
+
+            for (std::size_t k = 0; k < nnodes; ++k) {
+                const std::size_t next_k = (k + 1 == nnodes) ? 0 : (k + 1);
+                const std::size_t n_curr = static_cast<std::size_t>(mp.face_nodes[static_cast<std::size_t>(off_start) + k]);
+                const std::size_t n_next = static_cast<std::size_t>(mp.face_nodes[static_cast<std::size_t>(off_start) + next_k]);
+
+                const double px = mp.node_x[n_curr], py = mp.node_y[n_curr], pz = mp.node_z[n_curr];
+                const double qx = mp.node_x[n_next], qy = mp.node_y[n_next], qz = mp.node_z[n_next];
+
+                const double e1x = px - f0_x, e1y = py - f0_y, e1z = pz - f0_z;
+                const double e2x = qx - f0_x, e2y = qy - f0_y, e2z = qz - f0_z;
+
+                const double tri_sx = 0.5 * (e1y * e2z - e1z * e2y);
+                const double tri_sy = 0.5 * (e1z * e2x - e1x * e2z);
+                const double tri_sz = 0.5 * (e1x * e2y - e1y * e2x);
+
+                const double tri_area = std::sqrt(tri_sx * tri_sx + tri_sy * tri_sy + tri_sz * tri_sz);
+
+                Sx += tri_sx;
+                Sy += tri_sy;
+                Sz += tri_sz; 
+
+                const double tri_cx = (f0_x + px + qx) / 3.0;
+                const double tri_cy = (f0_y + py + qy) / 3.0;
+                const double tri_cz = (f0_z + pz + qz) / 3.0;
+
+                weighted_cx += tri_area * tri_cx;
+                weighted_cy += tri_area * tri_cy;
+                weighted_cz += tri_area * tri_cz;
+                total_sub_area += tri_area;
+            }
+
+            if (total_sub_area > 1e-15) {
+                const double inv_sub_area = 1.0 / total_sub_area;
+                fc_x = weighted_cx * inv_sub_area;
+                fc_y = weighted_cy * inv_sub_area;
+                fc_z = weighted_cz * inv_sub_area;
+            } else {
+                fc_x = f0_x;
+                fc_y = f0_y;
+                fc_z = f0_z;
+            }
         }
 
         const double area = std::sqrt(Sx * Sx + Sy * Sy + Sz * Sz);
@@ -377,6 +481,10 @@ void compute_mesh_geometry(MeshPart& mp) {
         const double ny = Sy * inv_area;
         const double nz = Sz * inv_area;
 
+        mp.face_centroid_x[f_sz] = fc_x;
+        mp.face_centroid_y[f_sz] = fc_y;
+        mp.face_centroid_z[f_sz] = fc_z;
+
         mp.face_area[f_sz]     = area;
         mp.face_normal_x[f_sz] = nx;
         mp.face_normal_y[f_sz] = ny;
@@ -389,11 +497,12 @@ void compute_mesh_geometry(MeshPart& mp) {
         // Step 4: Verification of Outward Normal Alignment
         // Normal must point from face_owner outward towards face_neigh.
         // ---------------------------------------------------------------------
-        const auto owner_sz = static_cast<std::size_t>(mp.face_owner[f_sz]);
+        const std::size_t owner_sz = static_cast<std::size_t>(mp.face_owner[f_sz]);
         const double oc_x = mp.cell_centroid_x[owner_sz];
         const double oc_y = mp.cell_centroid_y[owner_sz];
         const double oc_z = mp.cell_centroid_z[owner_sz];
 
+        
         const double d_vec_x = fc_x - oc_x;
         const double d_vec_y = fc_y - oc_y;
         const double d_vec_z = fc_z - oc_z;

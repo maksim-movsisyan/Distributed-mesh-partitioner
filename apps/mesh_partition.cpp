@@ -332,8 +332,9 @@ int main(int argc, char** argv) {
     cfd::mesh::migrate_local_mesh(std::move(m), std::move(dual_graph.faces), pr, mp);
 
 
-    // Parallel geometric processing, metric computation (volumes, centroids, face areas,
-    // unit normals), and strict topological orientation verification.
+    // Parallel geometric processing, metric computation (volumes, true volume centroids, 
+    // face areas, area-weighted face centroids, unit normals), and strict topological 
+    // orientation verification.
     //
     // MUST be called collectively by all ranks (performs MPI reductions internally
     // to calculate domain bounding statistics and verify global metric sanity).
@@ -346,25 +347,30 @@ int main(int argc, char** argv) {
     // Geometric Contract & Normal Orientation Guarantees:
     //
     //  1. Cell Metrics:
-    //     - Centroids: Computed as the arithmetic mean of cell vertices for all [0, n_cells) cells;
-    //     - Volumes: Calculated via Gauss' Divergence Theorem over polyhedral boundary faces
-    //       (supports arbitrary mixed topologies: TET, PYRA, PRISM, HEXA, MIXED).
-    //     - Positivity Guarantee: Asserts volume $V > 10^{-15}$ for all cells; aborts with a diagnostic
+    //     - Centroids: Exact volume centroids (center of mass for uniform density) 
+    //       computed via canonical tetrahedral decomposition with a shift-invariant local anchor 
+    //       x0 = mean(vertices), eliminating floating-point cancellation on meshes shifted from origin;
+    //     - Volumes: Exact signed volume integration over constituent tetrahedra, strictly 
+    //       consistent with the centroid moment calculation (supports arbitrary polyhedral types:
+    //       TET, PYRA, PRISM, HEXA, and general polyhedra);
+    //     - Positivity Guarantee: Asserts volume V > 10^-15 for all cells; aborts with a diagnostic
     //       dump if degenerate or inverted elements are detected.
     //
     //  2. Face Metrics & Normal Vector Convention (The Solver Contract):
-    //     - Interior Faces: The unit normal vector $\hat{n} = (\text{nx}, \text{ny}, \text{nz})$ is
-    //       strictly directed from `face_owner` OUTWARD toward `face_neigh`
-    //       ($\hat{n} \cdot (\vec{x}_{\text{face}} - \vec{x}_{\text{owner}}) > 0$).
+    //     - Centroids: Exact area-weighted centroids computed via sub-triangle fan integration 
+    //       (preserves 2nd-order accuracy on warped quads and non-regular polygons);
+    //     - Areas & Normals: Area vector S is accumulated across sub-triangles (magnitude A = ||S|| > 10^-15),
+    //       yielding the true mean surface normal n_hat = S / A;
+    //     - Interior Faces: The unit normal vector n_hat = (nx, ny, nz) is strictly directed from
+    //       `face_owner` OUTWARD toward `face_neigh` (n_hat · (x_face - x_owner) > 0);
     //     - Boundary Faces (`face_neigh == -1`): Follows the exact same outward contract — the normal
     //       points from `face_owner` toward the exterior, guaranteeing that all boundary normals
     //       point strictly OUTWARD from the computational domain.
-    //     - Areas: Accurate magnitude $A = \|\vec{S}\| > 10^{-15}$ computed via cross-product
-    //       triangulation / diagonal decomposition (exact for non-planar quads).
     //
-    //  3. Alignment Verification:
-    //     - Performs runtime dot-product assertion $\hat{n} \cdot (\vec{x}_{\text{face}} - \vec{x}_{\text{owner}}) > 0$
-    //       on all local faces to mathematically prove that face winding matches CGNS SIDS orientation.
+    //  3. Alignment & Skewness Verification:
+    //     - Performs runtime dot-product assertion n_hat · (x_face - x_owner) > 0 using physical 
+    //       centers of mass (x_face, x_owner), mathematically verifying that face winding matches 
+    //       CGNS SIDS orientation without false positives on high-aspect-ratio boundary-layer cells.
     //
     // After this call, `mp` is completely populated with all geometric metrics and fully verified,
     // ready for direct serialization into the solver-ready binary mesh format.

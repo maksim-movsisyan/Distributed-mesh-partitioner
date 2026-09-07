@@ -2,6 +2,14 @@
 
 #include <cstdint>
 
+#if defined(_MSC_VER)
+    #define CFD_RESTRICT __restrict
+#elif defined(__GNUC__) || defined(__clang__)
+    #define CFD_RESTRICT __restrict__
+#else
+    #define CFD_RESTRICT
+#endif
+
 namespace cfd {
 
 #if defined(CFD_INDEX_64BIT)
