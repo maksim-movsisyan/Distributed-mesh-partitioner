@@ -60,6 +60,8 @@ struct MeshAuxConnectivity {
     std::vector<LocalIndex> node_faces_offsets;         // size = n_nodes_own + 1
     std::vector<LocalIndex> node_faces;                 // size = sum_nodes_(faces per node)
 
+    // --- Add new connectivity ---
+    void add_connectivity(const MeshPart& mp, AuxConnType requested);
 
     // --- Status Checks ---
     [[nodiscard]] bool has(AuxConnType flag) const noexcept { return has_flag(active_mask, flag); }

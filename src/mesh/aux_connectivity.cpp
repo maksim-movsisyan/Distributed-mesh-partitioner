@@ -515,4 +515,54 @@ MeshAuxConnectivity build_aux_connectivity(const MeshPart& mp, AuxConnType mask)
     return aux;
 }
 
+void MeshAuxConnectivity::add_connectivity(const MeshPart& mp, AuxConnType requested) {
+    if (active_mask == AuxConnType::None) {
+        n_cells_own = mp.n_own;
+        n_faces     = mp.n_faces;
+        n_nodes_own = mp.n_nodes_own;
+    } else {
+        assert(n_cells_own == mp.n_own && 
+               n_faces     == mp.n_faces && 
+               n_nodes_own == mp.n_nodes_own &&
+               "MeshAuxConnectivity::add_connectivity: mismatch in mesh dimensions! "
+               "Did you pass a different MeshPart without calling clear() first?");
+    }
+
+    // 1. Cell -> Faces
+    if (has_flag(requested, AuxConnType::CellFaces) && !has_cell_faces()) {
+        build_cell_faces_conn(mp, cell_faces_offsets, cell_faces);
+        active_mask = active_mask | AuxConnType::CellFaces;
+    }
+
+    // 2. Cell -> Cells by Face
+    if (has_flag(requested, AuxConnType::CellCellsByFace) && !has_cell_cells_face()) {
+        build_cell_cells_face_conn(mp, cell_cells_face_offsets, cell_cells_face);
+        active_mask = active_mask | AuxConnType::CellCellsByFace;
+    }
+
+    // 3. Node -> Cells
+    if (has_flag(requested, AuxConnType::NodeCells) && !has_node_cells()) {
+        build_node_cells_conn(mp, node_cells_offsets, node_cells);
+        active_mask = active_mask | AuxConnType::NodeCells;
+    }
+
+    // 4. Node -> Faces
+    if (has_flag(requested, AuxConnType::NodeFaces) && !has_node_faces()) {
+        build_node_faces_conn(mp, node_faces_offsets, node_faces);
+        active_mask = active_mask | AuxConnType::NodeFaces;
+    }
+
+    // 5. Cell -> Cells by Node (с автоматическим выбором быстрого пути)
+    if (has_flag(requested, AuxConnType::CellCellsByNode) && !has_cell_cells_node()) {
+        if (has_node_cells()) {
+            build_cell_cells_node_conn(mp, node_cells_offsets, node_cells,
+                                       cell_cells_node_offsets, cell_cells_node);
+        } else {
+            build_cell_cells_node_conn(mp, cell_cells_node_offsets, cell_cells_node);
+        }
+        active_mask = active_mask | AuxConnType::CellCellsByNode;
+    }
+}
+
+
 } // namespace cfd::mesh
