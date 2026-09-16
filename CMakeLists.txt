@@ -215,6 +215,7 @@ add_library(
     cfd_cgns_io
     STATIC
         src/io/cgns/cgns_reader.cpp
+        src/io/cgns/cgns_writer.cpp
 )
 
 target_include_directories(
@@ -299,6 +300,21 @@ target_link_libraries(
     cfd_mpi      
     cfd_mesh      
     cfd_solver_mesh_io 
+)
+    #===============================================
+    #=== MESH EXTRUDION (ONLY FOR SPECIFIC NEEDS)===
+    #===============================================
+add_executable(mesh_extrudion apps/extrude_mesh.cpp)
+
+target_link_libraries(
+    mesh_extrudion
+    PRIVATE
+    cfd_project_warnings
+    cfd_project_options
+
+    cfd_mpi      
+    cfd_mesh      
+    cfd_cgns_io
 )
 
 #==================================================================
