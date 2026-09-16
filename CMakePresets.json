@@ -14,7 +14,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_PREFIX_PATH": "$env{HOME}/opt/cfd-deps/install/cgns-4.5.2-static;$env{HOME}/opt/cfd-deps/install/kaminpar-3.7.3",
+        "CMAKE_PREFIX_PATH": "$env{HOME}/Projects/cfd/deps/install/cgns-4-5-2;$env{HOME}/Projects/cfd/deps/install/kaminpar-3-7-3",
+
         "BUILD_TESTING": "ON"
       }
     },
@@ -26,7 +27,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_PREFIX_PATH": "$env{HOME}/opt/cfd-deps/install/cgns-4.5.2-static;$env{HOME}/opt/cfd-deps/install/kaminpar-3.7.3",
+        "CMAKE_PREFIX_PATH": "$env{HOME}/Projects/cfd/deps/install/cgns-4-5-2;$env{HOME}/Projects/cfd/deps/install/kaminpar-3-7-3",
         "BUILD_TESTING": "ON"
       }
     }
