@@ -131,19 +131,45 @@ add_library(
         src/mpi/log.cpp
         src/mpi/mpi_util.cpp
 )
-
 target_include_directories(
     cfd_mpi
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
-
 target_link_libraries(
     cfd_mpi
     PUBLIC
         MPI::MPI_CXX
         cfd_project_options
+    PRIVATE
+        cfd_project_warnings
+)
+
+    #====================== 
+    #=== MESH-GENERATOR ===
+    #======================
+add_library(
+    cfd_mesh_generator
+    STATIC
+        src/mesh_generator/config.cpp   
+)
+target_include_directories(
+    cfd_mesh_generator
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>  
+        $<INSTALL_INTERFACE:include> 
+)
+target_include_directories(
+    cfd_mesh_generator
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/tomlplusplus/include
+)
+target_link_libraries(
+    cfd_mesh_generator
+    PUBLIC
+        cfd_project_options
+        cfd_mpi
     PRIVATE
         cfd_project_warnings
 )
@@ -163,14 +189,12 @@ add_library(
         src/mesh/aux_connectivity.cpp
         src/mesh/aux_geometry.cpp
 )
-
 target_include_directories(
     cfd_mesh
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
-
 target_link_libraries(
     cfd_mesh
     PUBLIC
@@ -188,14 +212,12 @@ add_library(
     STATIC
         src/partition/partition.cpp
 )
-
 target_include_directories(
     cfd_partition
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
-
 target_link_libraries(
     cfd_partition
     PUBLIC
@@ -217,14 +239,12 @@ add_library(
         src/io/cgns/cgns_reader.cpp
         src/io/cgns/cgns_writer.cpp
 )
-
 target_include_directories(
     cfd_cgns_io
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
-
 target_link_libraries(
     cfd_cgns_io
     PUBLIC
@@ -245,34 +265,43 @@ add_library(
         src/io/solver_mesh/hdf5_reader.cpp
         src/io/vtk/vtu.cpp
 )
-
 target_include_directories(
     cfd_solver_mesh_io
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
-
 target_link_libraries(
     cfd_solver_mesh_io
     PUBLIC
-        MPI::MPI_CXX
-        HDF5::HDF5
         cfd_project_options
         cfd_mesh
         cfd_partition
+        cfd_mpi
     PRIVATE
         cfd_project_warnings
+        HDF5::HDF5
 )
 
 #==================================================================
 #==== EXECUTABLES =================================================
 #==================================================================
+    #======================
+    #=== MESH GENERATOR ===
+    #======================
+add_executable(mesh_generation apps/mesh_generation.cpp)
+target_link_libraries(
+    mesh_generation
+    PRIVATE
+        cfd_project_warnings
+        cfd_project_options
+        cfd_mesh_generator     
+)
+
     #===============================================
     #=== MESH PARTITONING (PREPARE SOLVER INPUT) ===
     #===============================================
 add_executable(mesh_partition apps/mesh_partition.cpp)
-
 target_link_libraries(
     mesh_partition
     PRIVATE
@@ -290,7 +319,6 @@ target_link_libraries(
     #=== PARTITIONED MESH READ ===
     #=============================
 add_executable(solver_mesh_check apps/solver_mesh_check.cpp)
-
 target_link_libraries(
     solver_mesh_check
     PRIVATE
@@ -305,7 +333,6 @@ target_link_libraries(
     #=== MESH EXTRUDION (ONLY FOR SPECIFIC NEEDS)===
     #===============================================
 add_executable(mesh_extrudion apps/extrude_mesh.cpp)
-
 target_link_libraries(
     mesh_extrudion
     PRIVATE

@@ -1,14 +1,4 @@
 #pragma once
-// Canonical CGNS element tables.
-//
-// For every volume element type the tables list its faces: fixed sets of
-// sets of local nodes in a fixed order. The node order is chosen so that
-// right-hand-rule normal points OUTWARD from the cell, assuming a
-// positively oriented element (positive volume per CGNS SIDS).
-//
-// The tables are self-checked at runtime on reference elements
-// (validate_face_tables() in geometry.cpp); on failure the program aborts
-// with a message instead of silently producing corrupted geometry.
 
 #include <cstddef>
 #include <cstdint>

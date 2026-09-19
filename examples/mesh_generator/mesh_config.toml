@@ -1,0 +1,93 @@
+[mesh]
+name = "BackwardFacingStep"
+scale = 1.0   # Scale factor to convert coordinates to SI meters
+
+# -----------------------------------------------------------------------------
+# 1. Macro Vertices (0-based indexing)
+# -----------------------------------------------------------------------------
+vertices = [
+  # --- z = 0.0 plane (bottom plane) ---
+  [-2.0, 2.0, 0.0], #  0: Inlet top-left
+  [ 0.0, 2.0, 0.0], #  1: Top wall above step
+  [ 6.0, 2.0, 0.0], #  2: Outlet top-right
+  [-2.0, 1.0, 0.0], #  3: Inlet bottom-left
+  [ 0.0, 1.0, 0.0], #  4: Step corner vertex
+  [ 6.0, 1.0, 0.0], #  5: Mid-height downstream interface
+  [ 0.0, 0.0, 0.0], #  6: Step bottom-left corner
+  [ 6.0, 0.0, 0.0], #  7: Outlet bottom-right
+
+  # --- z = 0.1 plane (top plane for 2.5D extrusion) ---
+  [-2.0, 2.0, 0.1], #  8: Inlet top-left (+z)
+  [ 0.0, 2.0, 0.1], #  9: Top wall above step (+z)
+  [ 6.0, 2.0, 0.1], # 10: Outlet top-right (+z)
+  [-2.0, 1.0, 0.1], # 11: Inlet bottom-left (+z)
+  [ 0.0, 1.0, 0.1], # 12: Step corner vertex (+z)
+  [ 6.0, 1.0, 0.1], # 13: Mid-height downstream interface (+z)
+  [ 0.0, 0.0, 0.1], # 14: Step bottom-left corner (+z)
+  [ 6.0, 0.0, 0.1]  # 15: Outlet bottom-right (+z)
+]
+
+# -----------------------------------------------------------------------------
+# 2. Macro Blocks (HEXA_8 topology)
+# -----------------------------------------------------------------------------
+[[blocks]]
+name = "inlet_channel"
+vertices = [3, 4, 1, 0, 11, 12, 9, 8]
+cells = [20, 15, 1]                                # Nx, Ny, Nz
+grading_type = ["uniform", "tanh_both", "uniform"] # Grading functions along (xi, eta, zeta)
+grading = [1.0, 2.5, 1.0]                          # Stretching factor / intensity delta
+
+[[blocks]]
+name = "step_top"
+vertices = [4, 5, 2, 1, 12, 13, 10, 9]
+cells = [60, 15, 1]
+grading_type = ["geometric", "tanh_end", "uniform"] # Fine near step (xi=0) & wall (eta=1)
+grading = [2.0, 2.5, 1.0]
+
+[[blocks]]
+name = "step_bottom"
+vertices = [6, 7, 5, 4, 14, 15, 13, 12]
+cells = [60, 15, 1]
+grading_type = ["geometric", "tanh_start", "uniform"] # Fine near step (xi=0) & bottom (eta=0)
+grading = [2.0, 2.5, 1.0]
+
+# -----------------------------------------------------------------------------
+# 3. Boundary Patches (QUAD_4 external faces)
+# -----------------------------------------------------------------------------
+[[boundaries]]
+name = "inlet"
+faces = [
+  [3, 11, 8, 0]          # Inlet patch: x = -2.0, y in [1, 2]
+]
+
+[[boundaries]]
+name = "outlet"
+faces = [
+  [5, 2, 10, 13],        # Outlet top section: x = 6.0, y in [1, 2]
+  [7, 5, 13, 15]         # Outlet bottom section: x = 6.0, y in [0, 1]
+]
+
+[[boundaries]]
+name = "walls"
+faces = [
+  # Top walls (y = 2.0)
+  [0, 8, 9, 1],          # Block 1 top wall
+  [1, 9, 10, 2],         # Block 2 top wall
+  # Step vertical wall (x = 0.0, y in [0, 1])
+  [6, 14, 12, 4],
+  # Bottom wall (y = 0.0)
+  [6, 7, 15, 14]         # Block 3 bottom wall
+]
+
+[[boundaries]]
+name = "symmetry"        # Front and back planes for 2.5D
+faces = [
+  # z = 0.0 plane
+  [0, 1, 4, 3],          # Block 1 front face
+  [1, 2, 5, 4],          # Block 2 front face
+  [4, 5, 7, 6],          # Block 3 front face
+  # z = 0.1 plane
+  [11, 12, 9, 8],        # Block 1 back face
+  [12, 13, 10, 9],       # Block 2 back face
+  [14, 15, 13, 12]       # Block 3 back face
+]
