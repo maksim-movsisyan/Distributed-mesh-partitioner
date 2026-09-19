@@ -12,6 +12,9 @@
 #include <string>
 
 #include "cfd/mesh_generator/config.hpp"
+#include "cfd/mesh_generator/grading.hpp"
+#include "cfd/mesh_generator/tfi.hpp"
+#include "cfd/mesh_generator/topology.hpp"
 #include "cfd/mpi/log.hpp"
 
 static void usage() {
@@ -138,6 +141,50 @@ int main(int argc, char** argv) {
         std::cout << "==================================================\n";
     }
 
+    if (rank == 0 && verbose > 0) {
+        std::cout << "\n--- Interpolation & Grading Spot Check ---\n";
+        for (std::size_t b = 0; b < cfg.blocks.size(); ++b) {
+            const auto& blk = cfg.blocks[b];
+            std::array<cfd::mesh_generator::Vec3, 8> corners;
+            for (std::size_t i = 0; i < 8; ++i) {
+                corners[i] = cfg.vertices[blk.vertices[i]];
+            }
+
+            const auto dist_x = cfd::mesh_generator::Grading::compute_distribution(blk.cells[0], blk.grading_type[0], blk.grading[0]);
+            const auto dist_y = cfd::mesh_generator::Grading::compute_distribution(blk.cells[1], blk.grading_type[1], blk.grading[1]);
+            const auto dist_z = cfd::mesh_generator::Grading::compute_distribution(blk.cells[2], blk.grading_type[2], blk.grading[2]);
+
+            const double xi_mid   = dist_x[blk.cells[0] / 2];
+            const double eta_mid  = dist_y[blk.cells[1] / 2];
+            const double zeta_mid = dist_z[blk.cells[2] / 2];
+
+            const auto p_center = cfd::mesh_generator::TFI::interpolate_hex(corners, xi_mid, eta_mid, zeta_mid);
+            std::printf("  Block [%zu] Center Physical Coord: (%.4f, %.4f, %.4f)\n", b, p_center.x, p_center.y, p_center.z);
+            std::printf("      First delta_x: %.6f, Last delta_x: %.6f\n", dist_x[1] - dist_x[0], dist_x.back() - dist_x[dist_x.size() - 2]);
+        }
+    }
+
+    cfd::mesh_generator::MacroTopology topo;
+    topo.build(cfg, MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        std::cout << "\n[Macro-Topology Analysis Succeeded]\n";
+        std::cout << "  Total Unique Nodes: " << topo.total_nodes() << "\n";
+        std::cout << "  Total Volume Cells: " << topo.total_cells() << "\n";
+        std::cout << "  Unique Macro Edges: " << topo.num_edges() << "\n";
+        std::cout << "  Unique Macro Faces: " << topo.num_faces() << "\n";
+
+        // Spot check cell 0 and last cell node IDs
+        const auto nodes_first = topo.get_cell_nodes(0);
+        const auto nodes_last  = topo.get_cell_nodes(topo.total_cells() - 1);
+
+        std::cout << "  Cell [0] Nodes (1-based): [";
+        for (std::size_t i = 0; i < 8; ++i) std::cout << nodes_first[i] << (i < 7 ? ", " : "]\n");
+
+        std::cout << "  Cell [" << topo.total_cells() - 1 << "] Nodes (1-based): [";
+        for (std::size_t i = 0; i < 8; ++i) std::cout << nodes_last[i] << (i < 7 ? ", " : "]\n");
+    }
+    
     MPI_Finalize();
     return EXIT_SUCCESS;
 }

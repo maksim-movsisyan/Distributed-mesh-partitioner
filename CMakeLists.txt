@@ -153,6 +153,7 @@ add_library(
     cfd_mesh_generator
     STATIC
         src/mesh_generator/config.cpp   
+        src/mesh_generator/topology.cpp
 )
 target_include_directories(
     cfd_mesh_generator
