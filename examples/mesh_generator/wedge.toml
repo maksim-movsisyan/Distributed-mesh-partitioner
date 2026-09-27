@@ -3,21 +3,21 @@
 # =============================================================================
 #
 #                            Top Flat Wall
-#   (7)==================(6)==================(5)=========================(4) Y = 1.0
-#    |                    |                    |                           |
-#    |                    |                    |                           |
-#    |    INLET_BLOCK     |    WEDGE_BLOCK     |       OUTLET_BLOCK        |
-#    |                    |                    |                           |
-#    |                    |                   (2)=========================(3) Y = 0.2
-#    |                    |                  /   Bottom Flat Floor (Outlet)
-#    |                    |                 /
-#    |                    |                / Wedge Rampa (Goes UP)
-#    |                    |               /
-#   (0)==================(1)-------------/                                 Y = 0.0
-#   Inlet Floor           
+#    (7)==================(6)===========(5)=========================(4) Y = 1.0
+#     |                    |             |                           |
+#   I |                    |             |                           |
+#   n |    INLET_BLOCK     | WEDGE_BLOCK |        OUTLET_BLOCK       | Outlet
+#   l |                    |             |                           |
+#   e |                    |           /(2)=========================(3) Y = 0.2
+#   t |                    |         /          Bottom Flat Floor
+#     |                    |       /
+#     |                    |     / Wedge Ramp (Goes UP)
+#     |                    |   /
+#    (0)==================(1)/                                   Y = 0.0
+#    Inlet Floor           
 #
-#   X = 0.0              X = 0.5              X = 1.1                     X = 3.0
-#   <---- L = 0.5 -----> <---- L = 0.6 -----> <----------- L = 1.9 ---------->
+#    X = 0.0              X = 0.5             X = 1.1                     X = 3.0
+#    <---- L = 0.5 -----> <---- L = 0.6 -----> <----------- L = 1.9 ---------->
 #
 #  Note: Vertices (8)-(15) follow the exact same structure extruded to z = 0.1
 # =============================================================================
@@ -31,24 +31,24 @@ scale = 1.0   # Scale factor to convert coordinates to SI meters
 # -----------------------------------------------------------------------------
 vertices = [
   # --- z = 0.0 plane (bottom plane) ---
-  [0.0, 0.0, 0.0],    # 0: Inlet bottom left
-  [0.5, 0.0, 0.0],    # 1: Wedge start bottom
-  [1.1, 0.2, 0.0],    # 2: Wedge end bottom
-  [3.0, 0.2, 0.0],    # 3: Outlet bottom right
-  [3.0, 1.0, 0.0],    # 4: Outlet top left
-  [1.1, 1.0, 0.0],    # 5: Wedge end top
-  [0.5, 1.0, 0.0],    # 6: Wedge start top
-  [0.0, 1.0, 0.0],    # 7: Inlet top left
+  [0.0, 0.0, 0.0],    #  0: Inlet bottom left
+  [0.5, 0.0, 0.0],    #  1: Wedge start bottom
+  [1.1, 0.2, 0.0],    #  2: Wedge end bottom
+  [3.0, 0.2, 0.0],    #  3: Outlet bottom right
+  [3.0, 1.0, 0.0],    #  4: Outlet top right  
+  [1.1, 1.0, 0.0],    #  5: Wedge end top
+  [0.5, 1.0, 0.0],    #  6: Wedge start top
+  [0.0, 1.0, 0.0],    #  7: Inlet top left
 
   # --- z = 0.1 plane (top plane for 2.5D extrusion) ---
-  [0.0, 0.0, 0.1],    # 8: Inlet bottom left
-  [0.5, 0.0, 0.1],    # 9: Wedge start bottom
-  [1.1, 0.2, 0.1],    # 10: Wedge end bottom
-  [3.0, 0.2, 0.1],    # 11: Outlet bottom right
-  [3.0, 1.0, 0.1],    # 12: Outlet top left
-  [1.1, 1.0, 0.1],    # 13: Wedge end top
-  [0.5, 1.0, 0.1],    # 14: Wedge start top
-  [0.0, 1.0, 0.1]     # 15: Inlet top left
+  [0.0, 0.0, 0.1],    #  8: Inlet bottom left (+z)
+  [0.5, 0.0, 0.1],    #  9: Wedge start bottom (+z)
+  [1.1, 0.2, 0.1],    # 10: Wedge end bottom (+z)
+  [3.0, 0.2, 0.1],    # 11: Outlet bottom right (+z)
+  [3.0, 1.0, 0.1],    # 12: Outlet top right (+z)
+  [1.1, 1.0, 0.1],    # 13: Wedge end top (+z)
+  [0.5, 1.0, 0.1],    # 14: Wedge start top (+z)
+  [0.0, 1.0, 0.1]     # 15: Inlet top left (+z)
 ]
 
 # -----------------------------------------------------------------------------
@@ -81,22 +81,38 @@ grading = [1.0, 1.0, 1.0]
 [[boundaries]]
 name = "inlet"
 faces = [
-  [0, 8, 15, 7]           
+  [0, 8, 15, 7]           # Normal: -x
 ]
 
 [[boundaries]]
 name = "outlet"
 faces = [
-  [3, 4, 12, 11]       
+  [3, 4, 12, 11]          # Normal: +x
 ]
 
 [[boundaries]]
 name = "walls"
 faces = [
-  [0, 1, 9, 8],
-  [1, 2, 10, 9],
-  [2, 3, 11, 10],
-  [7, 15, 14, 6],
-  [6, 14, 13, 5],
-  [5, 13, 12, 4]         
+  # --- Bottom walls ---
+  [0, 1, 9, 8],           # Inlet flat floor  (normal: -y)
+  [1, 2, 10, 9],          # Wedge inclined ramp (normal: outward/downward)
+  [2, 3, 11, 10],         # Outlet flat floor (normal: -y)
+  # --- Top flat walls ---
+  [7, 15, 14, 6],         # Inlet top wall    (normal: +y)
+  [6, 14, 13, 5],         # Wedge top wall    (normal: +y)
+  [5, 13, 12, 4]          # Outlet top wall   (normal: +y)
+]
+
+[[boundaries]]
+name = "symmetry"         # Front (z = 0.0) and Back (z = 0.1) planes for 2.5D
+faces = [
+  # --- Front planes (z = 0.0, normal: -z) ---
+  [0, 7, 6, 1],           # Inlet block front
+  [1, 6, 5, 2],           # Wedge block front
+  [2, 5, 4, 3],           # Outlet block front
+
+  # --- Back planes (z = 0.1, normal: +z) ---
+  [8, 9, 14, 15],         # Inlet block back
+  [9, 10, 13, 14],        # Wedge block back
+  [10, 11, 12, 13]        # Outlet block back
 ]

@@ -6,6 +6,8 @@ High-performance parallel preprocessing toolkit for an unstructured-mesh CFD sol
 
 `solver_mesh_check` loads the exported HDF5 container using the exact solver pattern (hyperslab collective MPI-IO slicing per rank), runs an exhaustive sanity audit (halo communication graph handshake, volume metrics, face normal orientations, BC coverage), and logs global domain diagnostics.
 
+`generate_mesh` parses a multi-block domain configuration (TOML) via in-memory collective broadcast, verifies geometric and topological contracts (positive Jacobians, conformal face matching), and constructs a zero-communication canonical macro-topology for deterministic global node and element indexing. It distributes nodes, cells, and boundary faces across MPI ranks using 1D slab decomposition, evaluates physical coordinates on the fly via 3D transfinite interpolation (TFI) with directional stretching functions (geometric, tanh), and exports a single-zone unstructured mesh in parallel (PCGNS / Parallel HDF5) containing HEXA_8 volume connectivity and outward-oriented QUAD_4 boundary sections with ZoneBC metadata.
+
 ---
 
 ## Project Layout
@@ -15,11 +17,13 @@ include/cfd/              Public headers (clean interface separation)
   ├── mpi/                MPI wrappers, collective reductions, structured logging
   ├── core/               Fundamental types (LocalIndex, GlobalIndex, precision)
   ├── mesh/               MeshPart SoA, geometric metrics, ghost layer, reordering
+  ├── mesh_generator/     Block mesh generator (see examples)
   ├── partition/          dKaMinPar wrapper + Space-Filling Curve rank mapping
   ├── io/cgns/            Parallel CGNS reader (PCGNS cgp_* API)
   ├── io/solver_mesh/     Parallel HDF5 mesh serializer and loader
   └── io/vtk/             Parallel VTU/PVTU export for ParaView visualization
 src/                      Library implementation sources mirroring include/
+examples/                 Usage examples (e.g for mesh generator input files)
 apps/                     Executables (mesh_partition, solver_mesh_check)
 tests/                    Unit & integration tests (API & partitioner smoke tests)
 mesh/                     Local test meshes (git-ignored)
@@ -32,6 +36,7 @@ mesh/                     Local test meshes (git-ignored)
 - `cfd_cgns_io` — Collective parallel CGNS reader (`cgp_*` API).
 - `cfd_solver_mesh_io` — High-throughput Parallel HDF5 writer/loader (`H5FD_MPIO_COLLECTIVE`).
 - `cfd_vtk_io` — Buffered parallel VTU/PVTU mesh exporters.
+- `cfd_mesh_generator` — Block structured mesh generator (output in unstructured CGNS format, so it can be used in partitioner directly)
 
 ---
 
@@ -89,6 +94,17 @@ mpirun -np 4 build/release/mesh_partition mesh/DesktopTest.cgns out/mesh.h5 \
 mpirun -np 4 build/release/solver_mesh_check out/mesh.h5 \
     --verbose \
     --dump-vtu out/vtu/loaded
+```
+
+### 3. Block mesh generator
+More info about input file structure see: [MESH-GENERATOR.md](./MESH-GENERATOR.md)
+
+
+```bash
+mkdir -p out
+mpirun -np 4 ./build/release/mesh_generation \
+             examples/mesh_generator/backward-facing-step.toml \
+             out/backward_step.cgns -v
 ```
 
 ### Visualizing in ParaView
