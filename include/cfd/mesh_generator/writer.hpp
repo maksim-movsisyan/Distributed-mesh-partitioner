@@ -9,7 +9,7 @@
 namespace cfd::mesh_generator {
 
 // Writes the complete unstructured mesh to CGNS collectively across all MPI ranks
-void write(const std::string& path,
+void write(const std::string& filepath,
            const GeneratorConfig& config,
            const MacroTopology& topo,
            MPI_Comm comm);

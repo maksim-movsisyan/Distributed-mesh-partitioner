@@ -144,30 +144,6 @@ int main(int argc, char** argv) {
     cfd::mesh_generator::MacroTopology topo;
     topo.build(cfg, MPI_COMM_WORLD);
 
-    const double topo_time = MPI_Wtime();
-
-    // Report results onn Rank 0
-    if (rank == 0) {
-        std::cout << "\n[Macro-Topology Analysis Succeeded]\n";
-        std::cout << "  Total Unique Nodes: " << topo.total_nodes() << "\n";
-        std::cout << "  Total Volume Cells: " << topo.total_cells() << "\n";
-        std::cout << "  Unique Macro Edges: " << topo.num_edges() << "\n";
-        std::cout << "  Unique Macro Faces: " << topo.num_faces() << "\n";
-
-        // Spot check cell 0 and last cell node IDs
-        const auto nodes_first = topo.get_cell_nodes(0);
-        const auto nodes_last  = topo.get_cell_nodes(topo.total_cells() - 1);
-
-        std::cout << "  Cell [0] Nodes (1-based): [";
-        for (std::size_t i = 0; i < 8; ++i) std::cout << nodes_first[i] << (i < 7 ? ", " : "]\n");
-
-        std::cout << "  Cell [" << topo.total_cells() - 1 << "] Nodes (1-based): [";
-        for (std::size_t i = 0; i < 8; ++i) std::cout << nodes_last[i] << (i < 7 ? ", " : "]\n");
-
-        std::printf("\nTopology build in %.4f s\n", topo_time - parse_time);
-        std::cout << "==================================================\n";
-    }
-
     // Output mesh
     cfd::mesh_generator::write(out_cgns_path, cfg, topo, MPI_COMM_WORLD);
     

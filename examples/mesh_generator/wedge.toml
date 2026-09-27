@@ -1,0 +1,102 @@
+# =============================================================================
+# Wedge Geometry (2D Cross-section at z = 0.0)
+# =============================================================================
+#
+#                            Top Flat Wall
+#   (7)==================(6)==================(5)=========================(4) Y = 1.0
+#    |                    |                    |                           |
+#    |                    |                    |                           |
+#    |    INLET_BLOCK     |    WEDGE_BLOCK     |       OUTLET_BLOCK        |
+#    |                    |                    |                           |
+#    |                    |                   (2)=========================(3) Y = 0.2
+#    |                    |                  /   Bottom Flat Floor (Outlet)
+#    |                    |                 /
+#    |                    |                / Wedge Rampa (Goes UP)
+#    |                    |               /
+#   (0)==================(1)-------------/                                 Y = 0.0
+#   Inlet Floor           
+#
+#   X = 0.0              X = 0.5              X = 1.1                     X = 3.0
+#   <---- L = 0.5 -----> <---- L = 0.6 -----> <----------- L = 1.9 ---------->
+#
+#  Note: Vertices (8)-(15) follow the exact same structure extruded to z = 0.1
+# =============================================================================
+
+[mesh]
+name = "Wedge"
+scale = 1.0   # Scale factor to convert coordinates to SI meters
+
+# -----------------------------------------------------------------------------
+# 1. Macro Vertices (0-based indexing)
+# -----------------------------------------------------------------------------
+vertices = [
+  # --- z = 0.0 plane (bottom plane) ---
+  [0.0, 0.0, 0.0],    # 0: Inlet bottom left
+  [0.5, 0.0, 0.0],    # 1: Wedge start bottom
+  [1.1, 0.2, 0.0],    # 2: Wedge end bottom
+  [3.0, 0.2, 0.0],    # 3: Outlet bottom right
+  [3.0, 1.0, 0.0],    # 4: Outlet top left
+  [1.1, 1.0, 0.0],    # 5: Wedge end top
+  [0.5, 1.0, 0.0],    # 6: Wedge start top
+  [0.0, 1.0, 0.0],    # 7: Inlet top left
+
+  # --- z = 0.1 plane (top plane for 2.5D extrusion) ---
+  [0.0, 0.0, 0.1],    # 8: Inlet bottom left
+  [0.5, 0.0, 0.1],    # 9: Wedge start bottom
+  [1.1, 0.2, 0.1],    # 10: Wedge end bottom
+  [3.0, 0.2, 0.1],    # 11: Outlet bottom right
+  [3.0, 1.0, 0.1],    # 12: Outlet top left
+  [1.1, 1.0, 0.1],    # 13: Wedge end top
+  [0.5, 1.0, 0.1],    # 14: Wedge start top
+  [0.0, 1.0, 0.1]     # 15: Inlet top left
+]
+
+# -----------------------------------------------------------------------------
+# 2. Macro Blocks (HEXA_8 topology)
+# -----------------------------------------------------------------------------
+[[blocks]]
+name = "inlet_block"
+vertices = [0, 1, 6, 7, 8, 9, 14, 15]
+cells = [20, 40, 1]                                # Nx, Ny, Nz
+grading_type = ["uniform", "uniform", "uniform"]   # Grading functions along (xi, eta, zeta)
+grading = [1.0, 1.0, 1.0]                          # Stretching factor / intensity delta
+
+[[blocks]]
+name = "wedge_block"
+vertices = [1, 2, 5, 6, 9, 10, 13, 14]
+cells = [24, 40, 1]
+grading_type = ["uniform", "uniform", "uniform"]
+grading = [1.0, 1.0, 1.0]
+
+[[blocks]]
+name = "outlet_block"
+vertices = [2, 3, 4, 5, 10, 11, 12, 13]
+cells = [76, 40, 1]
+grading_type = ["uniform", "uniform", "uniform"]  
+grading = [1.0, 1.0, 1.0]
+
+# -----------------------------------------------------------------------------
+# 3. Boundary Patches (QUAD_4 external faces)
+# -----------------------------------------------------------------------------
+[[boundaries]]
+name = "inlet"
+faces = [
+  [0, 8, 15, 7]           
+]
+
+[[boundaries]]
+name = "outlet"
+faces = [
+  [3, 4, 12, 11]       
+]
+
+[[boundaries]]
+name = "walls"
+faces = [
+  [0, 1, 9, 8],
+  [1, 2, 10, 9],
+  [2, 3, 11, 10],
+  [7, 15, 14, 6],
+  [6, 14, 13, 5],
+  [5, 13, 12, 4]         
+]
