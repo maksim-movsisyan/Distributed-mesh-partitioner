@@ -148,7 +148,8 @@ void write_cgns_parallel(const std::string& path, const mesh::RawMesh& m) {
 
     // 5. Boundary Sections: Group by Patch and Surface Type (TRI / QUAD)
     int bc_index = 1;
-
+    static_cast<void>(bc_index);
+    
     for (std::size_t p = 0; p < m.patch_list.size(); ++p) {
         const auto& patch_meta = m.patch_list[p];
 

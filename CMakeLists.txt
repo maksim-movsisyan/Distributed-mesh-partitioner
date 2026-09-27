@@ -154,6 +154,7 @@ add_library(
     STATIC
         src/mesh_generator/config.cpp   
         src/mesh_generator/topology.cpp
+        src/mesh_generator/writer.cpp
 )
 target_include_directories(
     cfd_mesh_generator
@@ -169,6 +170,7 @@ target_include_directories(
 target_link_libraries(
     cfd_mesh_generator
     PUBLIC
+        CGNS::cgns_static
         cfd_project_options
         cfd_mpi
     PRIVATE

@@ -225,6 +225,7 @@ void MacroTopology::build(const GeneratorConfig& config, MPI_Comm comm) {
 
 std::size_t MacroTopology::find_or_add_edge(std::size_t u, std::size_t v, std::size_t cells,
                                             GradingType gt, double g, const GeneratorConfig& cfg, MPI_Comm comm) {
+    static_cast<void>(cfg);
     const std::size_t v_min = std::min(u, v);
     const std::size_t v_max = std::max(u, v);
 
@@ -256,6 +257,7 @@ std::size_t MacroTopology::find_or_add_face(const std::array<std::size_t, 4>& q,
                                             GradingType gtu, GradingType gtv,
                                             double gu, double gv,
                                             const GeneratorConfig& cfg, MPI_Comm comm) {
+    static_cast<void>(cfg);
     for (std::size_t i = 0; i < faces_.size(); ++i) {
         if (faces_[i].vertices == q) {
             if ((faces_[i].cells_u != cu || faces_[i].cells_v != cv) &&
@@ -302,9 +304,6 @@ std::uint64_t MacroTopology::get_node_id(std::size_t b, std::size_t i, std::size
     if (bnd_count == 3) {
         const std::size_t corner = (on_z0 ? 0 : 4) +
                                    (on_y0 ? (on_x0 ? 0 : 1) : (on_x0 ? 3 : 2));
-        // Return 1-based vertex index
-        const auto& raw_block = lookups_[0]; // base pointer not needed, vertex is simply ID
-        (void)raw_block;
         // Vertex range is [1, num_macro_vertices]
         // Look up macro-block corner vertex
         const std::size_t v_idx = (corner == 0) ? (on_y0 ? (on_x0 ? 0 : 1) : (on_x0 ? 3 : 2))
@@ -353,6 +352,7 @@ std::uint64_t MacroTopology::get_node_id(std::size_t b, std::size_t i, std::size
         std::size_t f = 0;
         std::size_t u = 0, v = 0;
         std::size_t Nu = 0, Nv = 0;
+        static_cast<void>(Nv);
 
         if (on_z0) { f = 0; u = i; v = j; Nu = Nx; Nv = Ny; }
         else if (on_z1) { f = 5; u = i; v = j; Nu = Nx; Nv = Ny; }

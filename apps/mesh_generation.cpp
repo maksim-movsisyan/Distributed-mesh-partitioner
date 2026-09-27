@@ -12,9 +12,8 @@
 #include <string>
 
 #include "cfd/mesh_generator/config.hpp"
-#include "cfd/mesh_generator/grading.hpp"
-#include "cfd/mesh_generator/tfi.hpp"
 #include "cfd/mesh_generator/topology.hpp"
+#include "cfd/mesh_generator/writer.hpp"
 #include "cfd/mpi/log.hpp"
 
 static void usage() {
@@ -80,7 +79,7 @@ int main(int argc, char** argv) {
 
     if (rank == 0) {
         std::cout << "==================================================\n";
-        std::cout << "  CFD Block Mesh Generator (Validation Mode)\n";
+        std::cout << "  CFD Block Mesh Generator\n";
         std::cout << "  Processes: " << nprocs << "\n";
         std::cout << "  Config:    " << config_path << "\n";
         std::cout << "==================================================\n";
@@ -102,7 +101,7 @@ int main(int argc, char** argv) {
         total_boundary_faces += patch.faces.size();
     }
 
-    const double parse_time = MPI_Wtime() - t0;
+    const double parse_time = MPI_Wtime();
 
     // Report results on Rank 0
     if (rank == 0) {
@@ -116,7 +115,7 @@ int main(int argc, char** argv) {
         std::cout << "  Macro Bnd Faces:   " << total_boundary_faces << "\n";
 
         if (verbose > 0) {
-            std::cout << "\n--- Blocks Breakdown ---\n";
+            std::cout << "\n === Blocks Breakdown ===\n";
             for (std::size_t i = 0; i < cfg.blocks.size(); ++i) {
                 const auto& b = cfg.blocks[i];
                 const auto b_cells = static_cast<std::uint64_t>(b.cells[0]) * b.cells[1] * b.cells[2];
@@ -131,42 +130,23 @@ int main(int argc, char** argv) {
                           << b.grading[0] << ", " << b.grading[1] << ", " << b.grading[2] << "]\n";
             }
 
-            std::cout << "\n--- Boundary Patches ---\n";
+            std::cout << "\n === Boundary Patches ===\n";
             for (const auto& patch : cfg.boundaries) {
                 std::cout << "  Patch '" << patch.name << "': " << patch.faces.size() << " macro-faces\n";
             }
         }
 
-        std::printf("\nConfig parsed, broadcasted and verified in %.4f s\n", parse_time);
+        std::printf("\nConfig parsed, broadcasted and verified in %.4f s\n", parse_time - t0);
         std::cout << "==================================================\n";
     }
 
-    if (rank == 0 && verbose > 0) {
-        std::cout << "\n--- Interpolation & Grading Spot Check ---\n";
-        for (std::size_t b = 0; b < cfg.blocks.size(); ++b) {
-            const auto& blk = cfg.blocks[b];
-            std::array<cfd::mesh_generator::Vec3, 8> corners;
-            for (std::size_t i = 0; i < 8; ++i) {
-                corners[i] = cfg.vertices[blk.vertices[i]];
-            }
-
-            const auto dist_x = cfd::mesh_generator::Grading::compute_distribution(blk.cells[0], blk.grading_type[0], blk.grading[0]);
-            const auto dist_y = cfd::mesh_generator::Grading::compute_distribution(blk.cells[1], blk.grading_type[1], blk.grading[1]);
-            const auto dist_z = cfd::mesh_generator::Grading::compute_distribution(blk.cells[2], blk.grading_type[2], blk.grading[2]);
-
-            const double xi_mid   = dist_x[blk.cells[0] / 2];
-            const double eta_mid  = dist_y[blk.cells[1] / 2];
-            const double zeta_mid = dist_z[blk.cells[2] / 2];
-
-            const auto p_center = cfd::mesh_generator::TFI::interpolate_hex(corners, xi_mid, eta_mid, zeta_mid);
-            std::printf("  Block [%zu] Center Physical Coord: (%.4f, %.4f, %.4f)\n", b, p_center.x, p_center.y, p_center.z);
-            std::printf("      First delta_x: %.6f, Last delta_x: %.6f\n", dist_x[1] - dist_x[0], dist_x.back() - dist_x[dist_x.size() - 2]);
-        }
-    }
-
+    // Building mesh macro topology
     cfd::mesh_generator::MacroTopology topo;
     topo.build(cfg, MPI_COMM_WORLD);
 
+    const double topo_time = MPI_Wtime();
+
+    // Report results onn Rank 0
     if (rank == 0) {
         std::cout << "\n[Macro-Topology Analysis Succeeded]\n";
         std::cout << "  Total Unique Nodes: " << topo.total_nodes() << "\n";
@@ -183,7 +163,13 @@ int main(int argc, char** argv) {
 
         std::cout << "  Cell [" << topo.total_cells() - 1 << "] Nodes (1-based): [";
         for (std::size_t i = 0; i < 8; ++i) std::cout << nodes_last[i] << (i < 7 ? ", " : "]\n");
+
+        std::printf("\nTopology build in %.4f s\n", topo_time - parse_time);
+        std::cout << "==================================================\n";
     }
+
+    // Output mesh
+    cfd::mesh_generator::write(out_cgns_path, cfg, topo, MPI_COMM_WORLD);
     
     MPI_Finalize();
     return EXIT_SUCCESS;
