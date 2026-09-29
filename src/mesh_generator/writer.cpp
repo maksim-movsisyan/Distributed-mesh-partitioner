@@ -36,6 +36,31 @@ inline std::pair<std::uint64_t, std::uint64_t> decompose_1d(std::uint64_t total_
     return {start, start + count};
 }
 
+// Total application-side data-buffer budget per rank. Override at compile time
+// on every rank, e.g. -DCFD_MESH_WRITE_BUFFER_BYTES=134217728 for 128 MiB.
+#ifndef CFD_MESH_WRITE_BUFFER_BYTES
+#define CFD_MESH_WRITE_BUFFER_BYTES (64ULL * 1024ULL * 1024ULL)
+#endif
+constexpr std::uint64_t kWriteBufferBytes = CFD_MESH_WRITE_BUFFER_BYTES;
+static_assert(kWriteBufferBytes >= 8 * sizeof(cgsize_t) &&
+              kWriteBufferBytes >= 3 * sizeof(double), "Mesh write buffer is too small");
+
+// Every rank executes the same number of collective calls, including ranks
+// with no local data or an exhausted final chunk. A null data pointer denotes
+// an empty contribution to CGNS; never skip a collective on just one rank.
+template<class WriteChunk>
+void for_each_chunk(std::uint64_t total, std::uint64_t local_count, int nprocs,
+                    std::uint64_t capacity, WriteChunk&& write_chunk) {
+    const auto ranks = static_cast<std::uint64_t>(nprocs);
+    const std::uint64_t max_local = total / ranks + (total % ranks != 0);
+    for (std::uint64_t offset = 0; offset < max_local; ) {
+        const auto local_offset = std::min(offset, local_count);
+        const auto count = std::min(capacity, local_count - local_offset);
+        write_chunk(local_offset, count);
+        offset += std::min(capacity, max_local - offset);
+    }
+}
+
 // Canonical HEXA_8 outward face table matching cfd::mesh::kFaceTable
 constexpr int kHexaFaceTable[6][4] = {
     {0, 3, 2, 1}, // Face 0: bottom (-z)
@@ -64,6 +89,7 @@ void write(const std::string& filepath,
     MPI_Comm_rank(comm, &rank);
     MPI_Comm_size(comm, &nprocs);
 
+    check_cgns(cgp_mpi_comm(comm), "cgp_mpi_comm", comm);
     check_cgns(cgp_pio_mode(CGP_COLLECTIVE), "cgp_pio_mode(CGP_COLLECTIVE)", comm);
 
     int fn = 0;
@@ -93,26 +119,27 @@ void write(const std::string& filepath,
 
     const auto [node_start, node_end] = decompose_1d(total_nodes, rank, nprocs);
     const std::uint64_t local_nodes_cnt = node_end - node_start;
-    const bool has_nodes = (local_nodes_cnt > 0);
-
-    std::vector<double> px(local_nodes_cnt);
-    std::vector<double> py(local_nodes_cnt);
-    std::vector<double> pz(local_nodes_cnt);
-
-    for (std::uint64_t i = 0; i < local_nodes_cnt; ++i) {
-        const std::uint64_t global_id = (node_start + 1) + i;
-        const Vec3 coord = topo.evaluate_node_coord(global_id, config);
-        px[i] = coord.x;
-        py[i] = coord.y;
-        pz[i] = coord.z;
-    }
-
-    const cgsize_t r_coord_s = has_nodes ? static_cast<cgsize_t>(node_start + 1) : 1;
-    const cgsize_t r_coord_e = has_nodes ? static_cast<cgsize_t>(node_end) : 0;
-
-    check_cgns(cgp_coord_write_data(fn, base_id, zone_id, cx_id, &r_coord_s, &r_coord_e, has_nodes ? px.data() : nullptr), "cgp_coord_write_data(X)", comm);
-    check_cgns(cgp_coord_write_data(fn, base_id, zone_id, cy_id, &r_coord_s, &r_coord_e, has_nodes ? py.data() : nullptr), "cgp_coord_write_data(Y)", comm);
-    check_cgns(cgp_coord_write_data(fn, base_id, zone_id, cz_id, &r_coord_s, &r_coord_e, has_nodes ? pz.data() : nullptr), "cgp_coord_write_data(Z)", comm);
+    {
+        constexpr auto capacity = kWriteBufferBytes / (3 * sizeof(double));
+        const auto allocation = static_cast<std::size_t>(std::min(capacity, local_nodes_cnt));
+        std::vector<double> px(allocation), py(allocation), pz(allocation);
+        for_each_chunk(total_nodes, local_nodes_cnt, nprocs, capacity,
+                       [&](std::uint64_t offset, std::uint64_t count) {
+            const bool has_data = count != 0;
+            if (has_data) {
+                topo.evaluate_node_coords(node_start + offset + 1, static_cast<std::size_t>(count),
+                                          config, px.data(), py.data(), pz.data());
+            }
+            const cgsize_t first = has_data ? static_cast<cgsize_t>(node_start + offset + 1) : 1;
+            const cgsize_t last = has_data ? static_cast<cgsize_t>(node_start + offset + count) : 0;
+            check_cgns(cgp_coord_write_data(fn, base_id, zone_id, cx_id, &first, &last, has_data ? px.data() : nullptr),
+                       "cgp_coord_write_data(X)", comm);
+            check_cgns(cgp_coord_write_data(fn, base_id, zone_id, cy_id, &first, &last, has_data ? py.data() : nullptr),
+                       "cgp_coord_write_data(Y)", comm);
+            check_cgns(cgp_coord_write_data(fn, base_id, zone_id, cz_id, &first, &last, has_data ? pz.data() : nullptr),
+                       "cgp_coord_write_data(Z)", comm);
+        });
+    } // Release all coordinate buffers before allocating connectivity.
 
     // Volume HEXA_8 section write
     cgsize_t current_global_eid = 1;
@@ -127,22 +154,34 @@ void write(const std::string& filepath,
 
     const auto [cell_start, cell_end] = decompose_1d(total_cells, rank, nprocs);
     const std::uint64_t local_cells_cnt = cell_end - cell_start;
-    const bool has_cells = (local_cells_cnt > 0);
-
-    std::vector<cgsize_t> hex_conn(local_cells_cnt * 8);
-    for (std::uint64_t c = 0; c < local_cells_cnt; ++c) {
-        const std::uint64_t global_cell_id = cell_start + c;
-        const auto nodes = topo.get_cell_nodes(global_cell_id);
-        for (std::size_t k = 0; k < 8; ++k) {
-            hex_conn[c * 8 + k] = static_cast<cgsize_t>(nodes[k]);
-        }
-    }
-
-    const cgsize_t r_hex_s = has_cells ? static_cast<cgsize_t>(cell_start + 1) : 1;
-    const cgsize_t r_hex_e = has_cells ? static_cast<cgsize_t>(cell_end) : 0;
-
-    check_cgns(cgp_elements_write_data(fn, base_id, zone_id, hex_sec_id, r_hex_s, r_hex_e, has_cells ? hex_conn.data() : nullptr),
-               "cgp_elements_write_data(HEXA_8)", comm);
+    {
+        constexpr auto capacity = kWriteBufferBytes / (8 * sizeof(cgsize_t));
+        std::vector<cgsize_t> hex_conn(static_cast<std::size_t>(std::min(capacity, local_cells_cnt)) * 8);
+        for_each_chunk(total_cells, local_cells_cnt, nprocs, capacity,
+                       [&](std::uint64_t offset, std::uint64_t count) {
+            // Decode once per chunk, then walk cells in block/i/j/k order.
+            std::size_t b = 0, i = 0, j = 0, k = 0;
+            if (count != 0) topo.get_cell_block_and_ijk(cell_start + offset, b, i, j, k);
+            for (std::uint64_t c = 0; c < count; ++c) {
+                const auto nodes = topo.get_block_cell_nodes(b, i, j, k);
+                for (std::size_t n = 0; n < 8; ++n) hex_conn[c * 8 + n] = static_cast<cgsize_t>(nodes[n]);
+                const auto& dims = config.blocks[b].cells;
+                if (++i == dims[0]) {
+                    i = 0;
+                    if (++j == dims[1]) {
+                        j = 0;
+                        if (++k == dims[2]) { k = 0; ++b; }
+                    }
+                }
+            }
+            const bool has_data = count != 0;
+            const cgsize_t first = has_data ? static_cast<cgsize_t>(cell_start + offset + 1) : 1;
+            const cgsize_t last = has_data ? static_cast<cgsize_t>(cell_start + offset + count) : 0;
+            check_cgns(cgp_elements_write_data(fn, base_id, zone_id, hex_sec_id, first, last,
+                                              has_data ? hex_conn.data() : nullptr),
+                       "cgp_elements_write_data(HEXA_8)", comm);
+        });
+    } // Release volume connectivity before writing boundary patches.
 
     // Boundary QUAD_4 sections write
     for (const auto& patch : config.boundaries) {
@@ -193,6 +232,8 @@ void write(const std::string& filepath,
             }
         }
 
+        if (patch_total_quads == 0) continue;
+
         const cgsize_t patch_start = current_global_eid;
         const cgsize_t patch_end   = static_cast<cgsize_t>(static_cast<std::uint64_t>(patch_start) + patch_total_quads - 1);
         current_global_eid = patch_end + 1;
@@ -204,50 +245,54 @@ void write(const std::string& filepath,
 
         const auto [quad_start, quad_end] = decompose_1d(patch_total_quads, rank, nprocs);
         const std::uint64_t local_quads_cnt = quad_end - quad_start;
-        const bool has_quads = (local_quads_cnt > 0);
+        {
+            constexpr auto capacity = kWriteBufferBytes / (4 * sizeof(cgsize_t));
+            std::vector<cgsize_t> quad_conn(static_cast<std::size_t>(std::min(capacity, local_quads_cnt)) * 4);
+            for_each_chunk(patch_total_quads, local_quads_cnt, nprocs, capacity,
+                           [&](std::uint64_t offset, std::uint64_t count) {
+                for (std::uint64_t q = 0; q < count; ++q) {
+                    const std::uint64_t glob_q = quad_start + offset + q;
+                    auto it = std::upper_bound(resolved_faces.begin(), resolved_faces.end(), glob_q,
+                                               [](std::uint64_t val, const ResolvedPatchFace& f) {
+                                                   return val < f.face_cell_offset;
+                                               });
+                    if (it != resolved_faces.begin()) --it;
 
-        std::vector<cgsize_t> quad_conn(local_quads_cnt * 4);
+                    const auto& rf = *it;
+                    const std::uint64_t local_sub_q = glob_q - rf.face_cell_offset;
+                    const std::size_t u = static_cast<std::size_t>(local_sub_q % rf.Nu);
+                    const std::size_t v = static_cast<std::size_t>(local_sub_q / rf.Nu);
 
-        for (std::uint64_t q = 0; q < local_quads_cnt; ++q) {
-            const std::uint64_t glob_q = quad_start + q;
+                    const auto& blk = config.blocks[rf.block_idx];
+                    const std::size_t Nx = blk.cells[0];
+                    const std::size_t Ny = blk.cells[1];
+                    const std::size_t Nz = blk.cells[2];
 
-            auto it = std::upper_bound(resolved_faces.begin(), resolved_faces.end(), glob_q,
-                                       [](std::uint64_t val, const ResolvedPatchFace& f) {
-                                           return val < f.face_cell_offset;
-                                       });
-            if (it != resolved_faces.begin()) --it;
+                    std::size_t ci = 0, cj = 0, ck = 0;
+                    switch (rf.local_face_idx) {
+                        case 0: ci = u;      cj = v;      ck = 0;      break; // bottom
+                        case 1: ci = u;      cj = 0;      ck = v;      break; // front
+                        case 2: ci = Nx - 1; cj = u;      ck = v;      break; // right
+                        case 3: ci = u;      cj = Ny - 1; ck = v;      break; // back
+                        case 4: ci = 0;      cj = u;      ck = v;      break; // left
+                        case 5: ci = u;      cj = v;      ck = Nz - 1; break; // top
+                    }
 
-            const auto& rf = *it;
-            const std::uint64_t local_sub_q = glob_q - rf.face_cell_offset;
-            const std::size_t u = static_cast<std::size_t>(local_sub_q % rf.Nu);
-            const std::size_t v = static_cast<std::size_t>(local_sub_q / rf.Nu);
-
-            const auto& blk = config.blocks[rf.block_idx];
-            const std::size_t Nx = blk.cells[0];
-            const std::size_t Ny = blk.cells[1];
-            const std::size_t Nz = blk.cells[2];
-
-            std::size_t ci = 0, cj = 0, ck = 0;
-            switch (rf.local_face_idx) {
-                case 0: ci = u;      cj = v;      ck = 0;      break; // bottom
-                case 1: ci = u;      cj = 0;      ck = v;      break; // front
-                case 2: ci = Nx - 1; cj = u;      ck = v;      break; // right
-                case 3: ci = u;      cj = Ny - 1; ck = v;      break; // back
-                case 4: ci = 0;      cj = u;      ck = v;      break; // left
-                case 5: ci = u;      cj = v;      ck = Nz - 1; break; // top
-            }
-
-            const auto c_nodes = topo.get_block_cell_nodes(rf.block_idx, ci, cj, ck);
-            for (std::size_t k = 0; k < 4; ++k) {
-                quad_conn[q * 4 + k] = static_cast<cgsize_t>(c_nodes[static_cast<std::size_t>(kHexaFaceTable[rf.local_face_idx][k])]);
-            }
+                    const auto c_nodes = topo.get_block_cell_nodes(rf.block_idx, ci, cj, ck);
+                    for (std::size_t k = 0; k < 4; ++k) {
+                        quad_conn[q * 4 + k] = static_cast<cgsize_t>(c_nodes[static_cast<std::size_t>(kHexaFaceTable[rf.local_face_idx][k])]);
+                    }
+                }
+                const bool has_data = count != 0;
+                const cgsize_t first = has_data ? static_cast<cgsize_t>(
+                    static_cast<std::uint64_t>(patch_start) + quad_start + offset) : 1;
+                const cgsize_t last = has_data ? static_cast<cgsize_t>(
+                    static_cast<std::uint64_t>(patch_start) + quad_start + offset + count - 1) : 0;
+                check_cgns(cgp_elements_write_data(fn, base_id, zone_id, bnd_sec_id, first, last,
+                                                  has_data ? quad_conn.data() : nullptr),
+                           "cgp_elements_write_data(QUAD_4)", comm);
+            });
         }
-
-        const cgsize_t r_bnd_s = has_quads ? static_cast<cgsize_t>(static_cast<std::size_t>(patch_start) + quad_start) : 1;
-        const cgsize_t r_bnd_e = has_quads ? static_cast<cgsize_t>(static_cast<std::size_t>(patch_start) + quad_end - 1) : 0;
-
-        check_cgns(cgp_elements_write_data(fn, base_id, zone_id, bnd_sec_id, r_bnd_s, r_bnd_e, has_quads ? quad_conn.data() : nullptr),
-                   "cgp_elements_write_data(QUAD_4)", comm);
 
         int boco_id = 0;
         const cgsize_t range[2] = {patch_start, patch_end};

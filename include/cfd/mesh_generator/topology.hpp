@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <utility>
 
 #include <mpi.h>
 #include "cfd/mesh_generator/config.hpp"
@@ -43,6 +44,12 @@ public:
     [[nodiscard]] Vec3 evaluate_node_coord(std::uint64_t global_node_id,
                                           const GeneratorConfig& config) const noexcept;
 
+    // Evaluate a consecutive, 1-based node-ID interval into caller-owned arrays.
+    // Valid IDs and at least count entries in each output array are required.
+    void evaluate_node_coords(std::uint64_t first_node_id, std::size_t count,
+                              const GeneratorConfig& config,
+                              double* x, double* y, double* z) const noexcept;
+
     [[nodiscard]] std::array<std::uint64_t, 8> get_cell_nodes(std::uint64_t global_cell_id) const noexcept;
 
     [[nodiscard]] std::array<std::uint64_t, 8> get_block_cell_nodes(std::size_t block_idx,
@@ -78,7 +85,20 @@ private:
     };
     std::vector<BlockTopo> blocks_;
     std::vector<std::uint64_t> cell_offsets_;
-    std::vector<NodeSource> node_sources_;
+    // One descriptor per nonempty macro edge, face, or block interior.
+    // No storage proportional to the number of generated nodes.
+    struct NodeRange {
+        std::uint64_t first{0};
+        std::uint64_t count{0};
+        std::size_t block_idx{0};
+        std::array<std::size_t, 3> origin{};
+        std::array<std::size_t, 3> shape{1, 1, 1};
+        bool reversed{false};
+    };
+    std::vector<NodeSource> vertex_sources_;
+    std::vector<NodeRange> node_ranges_;
+
+    [[nodiscard]] const NodeRange& find_node_range(std::uint64_t id) const noexcept;
 
     std::size_t find_or_add_edge(std::size_t u, std::size_t v, std::size_t cells, MPI_Comm comm);
     std::size_t find_or_add_face(const std::array<std::size_t, 4>& quad_v,

@@ -1,6 +1,7 @@
 #include "cfd/mesh_generator/topology.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <format>
 #include <string>
 
@@ -23,6 +24,12 @@ void MacroTopology::build(const GeneratorConfig& config, MPI_Comm comm) {
     const std::size_t num_blocks = config.blocks.size();
     const std::size_t num_macro_vertices = config.vertices.size();
 
+    // build() may be called more than once on the same object.
+    edges_.clear();
+    faces_.clear();
+    blocks_.clear();
+    node_ranges_.clear();
+    vertex_sources_.assign(num_macro_vertices, NodeSource{});
     blocks_.resize(num_blocks);
     cell_offsets_.assign(num_blocks + 1, 0);
 
@@ -124,24 +131,70 @@ void MacroTopology::build(const GeneratorConfig& config, MPI_Comm comm) {
 
     total_nodes_ = current_id - 1;
 
-    // Register primary source coordinates for every global node
-    node_sources_.resize(total_nodes_);
+    // Construct sources at macro scale. Updating in block order preserves the
+    // original last-block-wins choice for shared vertices, edges and faces.
+    std::vector<NodeRange> edge_sources(edges_.size());
+    std::vector<NodeRange> face_sources(faces_.size());
+    node_ranges_.reserve(edges_.size() + faces_.size() + num_blocks);
 
+    constexpr std::array<std::array<std::size_t, 3>, 8> corner_ijk = {{
+        {0,0,0}, {1,0,0}, {1,1,0}, {0,1,0},
+        {0,0,1}, {1,0,1}, {1,1,1}, {0,1,1}
+    }};
     for (std::size_t b = 0; b < num_blocks; ++b) {
         const auto& blk = config.blocks[b];
-        const std::size_t Nx = blk.cells[0];
-        const std::size_t Ny = blk.cells[1];
-        const std::size_t Nz = blk.cells[2];
-
-        for (std::size_t k = 0; k <= Nz; ++k) {
-            for (std::size_t j = 0; j <= Ny; ++j) {
-                for (std::size_t i = 0; i <= Nx; ++i) {
-                    const std::uint64_t nid = get_node_id(b, i, j, k);
-                    node_sources_[nid - 1] = {b, i, j, k};
-                }
-            }
+        const auto& bt = blocks_[b];
+        const std::array<std::size_t, 3> n = {blk.cells[0], blk.cells[1], blk.cells[2]};
+        for (std::size_t c = 0; c < 8; ++c) {
+            vertex_sources_[blk.vertices[c]] = {b, corner_ijk[c][0] * n[0],
+                                                  corner_ijk[c][1] * n[1],
+                                                  corner_ijk[c][2] * n[2]};
+        }
+        for (std::size_t e = 0; e < 12; ++e) {
+            const auto [idx, reversed] = bt.edges[e];
+            if (edges_[idx].num_cells <= 1) continue;
+            NodeRange r;
+            r.first = edges_[idx].global_start_id;
+            r.count = edges_[idx].num_cells - 1;
+            r.block_idx = b;
+            r.reversed = reversed;
+            const auto& corner = corner_ijk[hex_edge_pairs[e].first];
+            for (std::size_t d = 0; d < 3; ++d) r.origin[d] = corner[d] * n[d];
+            const std::size_t axis = e / 4;
+            r.origin[axis] = 1;
+            r.shape[axis] = n[axis] - 1;
+            edge_sources[idx] = r;
+        }
+        for (std::size_t f = 0; f < 6; ++f) {
+            const auto idx = bt.faces[f];
+            const auto& face = faces_[idx];
+            if (face.cells_u <= 1 || face.cells_v <= 1) continue;
+            NodeRange r;
+            r.first = face.global_start_id;
+            r.count = (face.cells_u - 1) * (face.cells_v - 1);
+            r.block_idx = b;
+            r.origin = {1, 1, 1};
+            r.shape = {n[0] - 1, n[1] - 1, n[2] - 1};
+            const std::size_t normal = (f == 0 || f == 5) ? 2 : ((f == 1 || f == 3) ? 1 : 0);
+            const bool upper = (f == 2 || f == 3 || f == 5);
+            r.origin[normal] = upper ? n[normal] : 0;
+            r.shape[normal] = 1;
+            face_sources[idx] = r;
+        }
+        if (bt.vol_count > 0) {
+            NodeRange r;
+            r.first = bt.vol_start_id;
+            r.count = bt.vol_count;
+            r.block_idx = b;
+            r.origin = {1, 1, 1};
+            r.shape = {n[0] - 1, n[1] - 1, n[2] - 1};
+            node_ranges_.push_back(r);
         }
     }
+    for (const auto& r : edge_sources) if (r.count > 0) node_ranges_.push_back(r);
+    for (const auto& r : face_sources) if (r.count > 0) node_ranges_.push_back(r);
+    std::sort(node_ranges_.begin(), node_ranges_.end(),
+              [](const NodeRange& a, const NodeRange& b) { return a.first < b.first; });
 }
 
 std::size_t MacroTopology::find_or_add_edge(std::size_t u, std::size_t v, std::size_t cells, MPI_Comm comm) {
@@ -168,7 +221,7 @@ std::size_t MacroTopology::find_or_add_face(const std::array<std::size_t, 4>& q_
     std::sort(sorted_q.begin(), sorted_q.end());
 
     static_cast<void>(comm);
-    
+
     for (std::size_t i = 0; i < faces_.size(); ++i) {
         auto existing = faces_[i].vertices;
         std::sort(existing.begin(), existing.end());
@@ -257,22 +310,82 @@ std::uint64_t MacroTopology::get_node_id(std::size_t b, std::size_t i, std::size
     return bt.vol_start_id + v_idx;
 }
 
+const MacroTopology::NodeRange& MacroTopology::find_node_range(std::uint64_t id) const noexcept {
+    auto it = std::upper_bound(node_ranges_.begin(), node_ranges_.end(), id,
+                              [](std::uint64_t value, const NodeRange& r) { return value < r.first; });
+    return *--it;
+}
+
 Vec3 MacroTopology::evaluate_node_coord(std::uint64_t global_node_id,
                                         const GeneratorConfig& config) const noexcept {
-    const auto& src = node_sources_[global_node_id - 1];
-    const auto& bt  = blocks_[src.block_idx];
-    const auto& blk = config.blocks[src.block_idx];
-
-    const double xi   = bt.dist_x[src.i];
-    const double eta  = bt.dist_y[src.j];
-    const double zeta = bt.dist_z[src.k];
-
-    std::array<Vec3, 8> corners;
-    for (std::size_t c = 0; c < 8; ++c) {
-        corners[c] = config.vertices[blk.vertices[c]];
+    NodeSource src;
+    if (global_node_id <= vertex_sources_.size()) {
+        src = vertex_sources_[global_node_id - 1];
+    } else {
+        const auto& r = find_node_range(global_node_id);
+        std::uint64_t q = global_node_id - r.first;
+        if (r.reversed) q = r.count - 1 - q;
+        src.block_idx = r.block_idx;
+        src.i = r.origin[0] + static_cast<std::size_t>(q % r.shape[0]);
+        q /= r.shape[0];
+        src.j = r.origin[1] + static_cast<std::size_t>(q % r.shape[1]);
+        src.k = r.origin[2] + static_cast<std::size_t>(q / r.shape[1]);
     }
+    const auto& bt = blocks_[src.block_idx];
+    const auto& blk = config.blocks[src.block_idx];
+    std::array<Vec3, 8> corners;
+    for (std::size_t c = 0; c < 8; ++c) corners[c] = config.vertices[blk.vertices[c]];
+    return TFI::interpolate_hex(corners, bt.dist_x[src.i], bt.dist_y[src.j], bt.dist_z[src.k]);
+}
 
-    return TFI::interpolate_hex(corners, xi, eta, zeta);
+void MacroTopology::evaluate_node_coords(std::uint64_t first_node_id, std::size_t count,
+                                         const GeneratorConfig& config,
+                                         double* x, double* y, double* z) const noexcept {
+    std::size_t out = 0;
+    while (out < count && first_node_id <= vertex_sources_.size()) {
+        const auto p = evaluate_node_coord(first_node_id++, config);
+        x[out] = p.x; y[out] = p.y; z[out] = p.z;
+        ++out;
+    }
+    if (out == count) return;
+    // One lookup per batch, then walk adjacent descriptors. Decode only the
+    // first index of each span; advance i/j/k without integer division.
+    const NodeRange* range = &find_node_range(first_node_id);
+    while (out < count) {
+        const auto& r = *range;
+        const auto& bt = blocks_[r.block_idx];
+        const auto& blk = config.blocks[r.block_idx];
+        std::array<Vec3, 8> corners;
+        for (std::size_t c = 0; c < 8; ++c) corners[c] = config.vertices[blk.vertices[c]];
+        const std::uint64_t offset = first_node_id - r.first;
+        const std::size_t span = static_cast<std::size_t>(
+            std::min<std::uint64_t>(count - out, r.count - offset));
+        std::uint64_t q = r.reversed ? r.count - 1 - offset : offset;
+        std::size_t i = static_cast<std::size_t>(q % r.shape[0]);
+        q /= r.shape[0];
+        std::size_t j = static_cast<std::size_t>(q % r.shape[1]);
+        std::size_t k = static_cast<std::size_t>(q / r.shape[1]);
+        for (std::size_t t = 0; t < span; ++t, ++out) {
+            const auto p = TFI::interpolate_hex(corners,
+                bt.dist_x[r.origin[0] + i], bt.dist_y[r.origin[1] + j], bt.dist_z[r.origin[2] + k]);
+            x[out] = p.x; y[out] = p.y; z[out] = p.z;
+            if (!r.reversed) {
+                if (++i == r.shape[0]) {
+                    i = 0;
+                    if (++j == r.shape[1]) { j = 0; ++k; }
+                }
+            } else {
+                if (i > 0) --i;
+                else {
+                    i = r.shape[0] - 1;
+                    if (j > 0) --j;
+                    else { j = r.shape[1] - 1; if (k > 0) --k; }
+                }
+            }
+        }
+        first_node_id += span;
+        ++range;
+    }
 }
 
 void MacroTopology::get_cell_block_and_ijk(std::uint64_t global_cell_id,

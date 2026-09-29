@@ -57,21 +57,21 @@ vertices = [
 [[blocks]]
 name = "inlet_block"
 vertices = [0, 1, 6, 7, 8, 9, 14, 15]
-cells = [20, 40, 1]                                # Nx, Ny, Nz
+cells = [2000, 1000, 1]                                # Nx, Ny, Nz
 grading_type = ["uniform", "uniform", "uniform"]   # Grading functions along (xi, eta, zeta)
 grading = [1.0, 1.0, 1.0]                          # Stretching factor / intensity delta
 
 [[blocks]]
 name = "wedge_block"
 vertices = [1, 2, 5, 6, 9, 10, 13, 14]
-cells = [24, 40, 1]
+cells = [2400, 1000, 1]
 grading_type = ["uniform", "uniform", "uniform"]
 grading = [1.0, 1.0, 1.0]
 
 [[blocks]]
 name = "outlet_block"
 vertices = [2, 3, 4, 5, 10, 11, 12, 13]
-cells = [76, 40, 1]
+cells = [7600, 1000, 1]
 grading_type = ["uniform", "uniform", "uniform"]  
 grading = [1.0, 1.0, 1.0]
 
