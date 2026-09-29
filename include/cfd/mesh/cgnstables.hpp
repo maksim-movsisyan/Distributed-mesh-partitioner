@@ -133,15 +133,4 @@ struct FaceKey {
     }
 };
 
-struct FaceKeyHash {
-    [[nodiscard]] std::size_t operator()(const FaceKey& k) const noexcept {
-        std::uint64_t h = 1469598103934665603ULL;
-        for (std::size_t i = 0; i < 4; ++i) {
-            h ^= static_cast<std::uint64_t>(k.v[i]);
-            h *= 1099511628211ULL;
-        }
-        return static_cast<std::size_t>(h);
-    }
-};
-
 } //namespace cfd::mesh

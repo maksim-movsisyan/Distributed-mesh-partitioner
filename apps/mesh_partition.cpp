@@ -136,68 +136,86 @@ int main(int argc, char** argv) {
     cfd::mesh::RawMesh m = cfd::io::cgns::read_cgns_parallel(in, MPI_COMM_WORLD);
 
 
-    // Distributed construction of unique faces, boundary condition matching,
-    // and dual graph CSR representation from raw block-distributed mesh slices.
+    // Distributed construction of unique faces, boundary-patch matching,
+    // and a symmetric dual graph in CSR format.
     //
-    // MUST be called collectively by all ranks in `m.comm` (uses MPI_Alltoall,
-    // MPI_Alltoallv, and MPI_Allreduce internally) — calling it on a subset of
-    // ranks will deadlock.
+    // Collective operation: every rank in `m.comm`, including ranks with no
+    // local cells, must participate. Uses MPI_Alltoall, MPI_Alltoallv,
+    // and MPI_Allreduce internally.
     //
     // Preconditions:
-    //  - `m` contains valid contiguous 1D block-split slices of cells, nodes,
-    //    and surface elements (as produced by read_cgns_parallel);
-    //  - `m.cnodes` conforms to canonical CGNS SIDS element node orderings;
-    //  - Volume cells are strictly 3D manifold elements (TET_4, PYRA_5,
-    //    PRISM_6, HEXA_8); non-manifold meshes (>2 cells sharing a face)
-    //    will abort via mpi::fatal().
+    //  - `m` contains valid block-distributed mesh slices and displacement tables;
+    //  - Cell connectivity follows canonical CGNS SIDS node ordering;
+    //  - Supported volume cells are tetrahedra, pyramids, prisms, and hexahedra;
+    //  - Surface elements contain canonical FaceKeys and valid patch assignments;
+    //  - More than two volume half-faces sharing a key cause mpi::fatal().
     //
-    // Algorithm Overview (2-Phase Rendezvous / Owner-Compute Scheme):
+    // Algorithm Overview:
     //
-    //  Phase 1: Generation & Hash-Based Rendezvous Dispatch
-    //   - Every rank iterates over its local volume cells, extracts canonical
-    //     sub-faces using CGNS lookup tables, and builds a sorted 4-node `FaceKey`.
-    //   - Every rank takes its local slice of `surf_elems` (containing BC PatchIds).
-    //   - A rendezvous destination rank is computed deterministically via
-    //     `FaceKeyHash(FaceKey) % nprocs`, guaranteeing uniform O(N_faces / P) memory
-    //     and network distribution across all ranks (prevents incast / skew on rank 0).
-    //   - All half-faces and surface elements are packed and dispatched using
-    //     a single `MPI_Alltoallv` exchange.
+    //  Step 1: Compact Source Index & Batch Planning
+    //   - Counts local volume half-faces and surface elements.
+    //   - Uses the maximum local count across ranks to select a common number
+    //     of communication rounds.
+    //   - Builds canonical face keys by sorting their node GIDs.
+    //   - Stores 64-bit source references instead of retaining full messages
+    //     for every local half-face and surface element.
     //
-    //  Phase 2: Deduplication, Matching & Ownership Assignment
-    //   - On each rendezvous rank, incoming records are sorted by `FaceKey`
-    //     to cluster coincident half-faces in contiguous cache lines.
-    //   - Deduplication matches pairs:
-    //      * 2 volume half-faces  -> Interior Face (cell_a = min(c1, c2), cell_b = max(c1, c2));
-    //      * 1 volume + 1 surface -> Boundary Face (cell_a = c1, cell_b = -1, patch = SurfElem.patch);
-    //      * 1 volume only        -> Undefined Boundary Face (cell_a = c1, cell_b = -1, patch = -1).
-    //   - Ownership Rule: The rank owning `cell_a` is assigned sole ownership of the `FaceRec`.
+    //  Step 2: Hash-Based Assignment to Rounds & Rendezvous Ranks
+    //   - Mixes all FaceKey slots with a private hash and a final avalanche.
+    //   - Maps each key to a bucket identifying both its round and destination.
+    //   - Equal keys always reach the same rank in the same round, so matching
+    //     never requires carrying unmatched records between rounds.
+    //   - Hash mixing improves distribution for regularly numbered meshes;
+    //     perfect load balance is not guaranteed.
     //
-    //  Phase 3: Dispatch to Cell Owners & Graph Back-Edges
-    //   - Full `FaceRec` structures are dispatched to the owner rank of `cell_a`.
-    //   - For inter-rank interior faces (`rank(cell_a) != rank(cell_b)`), a lightweight
-    //     `DualEdgeMsg (cell_b -> cell_a)` is dispatched to the owner of `cell_b`
-    //     to ensure CSR graph symmetry without duplicating heavy `FaceRec` storage.
-    //   - Dispatched via two parallel packed `MPI_Alltoallv` exchanges.
+    //  Step 3: Batched Exchange & Face Matching
+    //   - Materializes full messages only for the current round.
+    //   - Exchanges them using packed MPI_Alltoallv and releases send storage.
+    //   - Sorts received messages by FaceKey and processes equal-key groups:
+    //      * Two volume records: interior face, with cell_a < cell_b;
+    //      * One volume record: boundary face, using the matching surface patch
+    //        when available, otherwise kInvalidPatchId;
+    //      * Surface-only group: no mesh face is emitted.
+    //   - Counts outputs and then packs them directly, avoiding an intermediate
+    //     array containing all matched FaceRec objects.
     //
-    //  Phase 4: Dual Graph CSR Assembly & Global Stats Reduction
-    //   - Receiving ranks assemble the local Dual Graph in CSR format (`offsets` + `adj`).
-    //   - Every local vertex's adjacency slice is sorted by global cell ID (required
-    //     by ParMETIS / PT-Scotch / KaHIP and enables O(log(deg)) binary searches).
-    //   - A single collective `MPI_Allreduce` computes global face statistics.
+    //  Step 4: Dispatch to Original Cell Owners
+    //   - Sends each FaceRec to the rank owning cell_a in `m.cell_displ`.
+    //   - For an interior face whose cells belong to different ranks, sends
+    //     a lightweight reverse edge (cell_b -> cell_a) to cell_b's owner.
+    //   - Releases the rendezvous receive buffer before these two successive
+    //     exchanges; retains received face and edge chunks for final assembly.
     //
-    // After this call, each rank holds:
-    //  - `result.faces`: list of unique faces where `cell_a` is local to this rank
-    //    (zero memory duplication across partition boundaries; exactly 1 copy of
-    //    each mesh face exists globally across all ranks);
-    //  - `result.graph`: symmetric distributed CSR dual graph for local cells
-    //    [my_cell_start, my_cell_end), containing all local-local and inter-rank
-    //    cell-cell adjacencies;
-    //  - `result.stats`: replicated global totals (total unique faces, total interior,
-    //    total boundary).
+    //  Step 5: CSR Assembly & Global Statistics
+    //   - Consolidates face chunks, releasing each consumed chunk.
+    //   - Counts graph degrees directly in the CSR offsets array, computes
+    //     prefix sums, and fills adjacency with global neighboring cell IDs.
+    //   - Inserts both directions of every interior connection, using reverse
+    //     edge messages for connections crossing original rank boundaries.
+    //   - Sorts each cell's adjacency slice by global cell ID.
+    //   - Reduces global face counts, directed graph-edge counts, and
+    //     rendezvous-distribution diagnostics.
+    //
+    // Memory Semantics:
+    //  - `m` is read-only and remains usable after this call.
+    //  - CFD_FACES_BATCH_BYTES defaults to 128 MiB and controls the target
+    //    average half-face send-buffer size per rank per round.
+    //  - This target is NOT a strict receive-buffer or process-memory limit.
+    //  - Temporary buffers are released after their last use; final face and
+    //    graph storage still scales with the rank's retained output.
+    //
+    // After this call:
+    //  - result.faces contains exactly one globally owned record per mesh face;
+    //    its cell_a belongs to this rank's original cell block.
+    //  - result.graph contains symmetric CSR adjacency for local cells,
+    //    including connections to cells on other ranks.
+    //  - result.stats contains replicated global totals.
+    //  - Face-vector order is not a stable global numbering and may change
+    //    with the rank count or batch configuration.
     cfd::mesh::BuildFacesResult dual_graph;
     dual_graph = cfd::mesh::build_faces(m);
 
-
+    
     // Distributed dual-graph partitioning (dKaMinPar) and hardware topology-aware
     // process placement.
     //
@@ -259,75 +277,107 @@ int main(int argc, char** argv) {
     );
 
 
-    // Distributed mesh migration, ghost-layer halo construction, local 0-based
-    // renumbering, and solver communication topology generation.
+    // Distributed mesh redistribution, one-layer face-neighbor halo construction,
+    // local zero-based renumbering, and solver communication-map generation.
     //
-    // MUST be called collectively by all ranks in `m.comm` (uses Alltoall/Alltoallv
-    // point-to-point exchanges and Allreduce reductions internally) — calling it on
-    // a subset of ranks will deadlock.
+    // Collective operation: every rank in `m.comm`, including empty ranks,
+    // must participate. Uses packed collective exchanges and global reductions.
     //
     // Memory Semantics:
-    //  - Destructive move (`std::move`): Takes ownership of `m` (RawMesh) and
-    //    `dual_graph.faces` (std::vector<FaceRec>), progressively freeing raw data
-    //    buffers (`m.ctype`, `m.cnodes`, `m.coords_*`, `faces`) as each migration
-    //    phase completes to strictly prevent 2x memory duplication spikes.
+    //  - Destructively consumes selected buffers from `m` and `faces` through
+    //    rvalue references; callers must not rely on their original contents.
+    //  - Moves reusable arrays and releases temporary storage after its last use.
+    //  - Uses flat connectivity arrays, compact face records, and adaptive
+    //    dense/open-addressed GID lookups to reduce allocation overhead.
+    //  - Single-rank paths reuse storage and bypass redistribution where possible.
+    //  - Temporary send/receive and conversion buffers can still overlap;
+    //    there is no fixed bound on peak process memory.
     //
     // Preconditions:
-    //  - `m` contains valid raw chunked mesh data with displacement tables (`cell_displ`, `node_displ`);
-    //  - `dual_graph.faces` contains validated unique interior and boundary faces with CGNS local face IDs;
-    //  - `pr` contains valid partitioning maps (`cell_target_rank`, `part2rank`, `rank2part`, `global_edge_cut`).
+    //  - `m` contains valid raw connectivity, coordinates, BC metadata,
+    //    and original cell/node displacement tables.
+    //  - `faces` contains unique faces produced by build_faces(), stored on the
+    //    original owner rank of cell_a, with valid CGNS local face indices.
+    //  - `pr.cell_target_rank` provides a destination MPI rank for each raw
+    //    local cell.
+    //  - `pr.global_edge_cut` counts unique faces crossing destination ranks,
+    //    consistently with the supplied partition.
     //
-    // Pipeline Overview (9 Deterministic Stages):
+    // Pipeline Overview:
     //
-    //  Step 1: Remote Target Rank Resolution
-    //   - Identifies destination MPI ranks for remote `cell_b` instances on partition
-    //     boundaries via a lightweight 1-round request-reply Alltoallv handshake.
+    //  Step 1: Resolve Remote Cell Destinations
+    //   - Reads target ranks directly for locally held cells.
+    //   - Requests the destination of remote cell_b entries from their original
+    //     cell owners using request and reply exchanges.
     //
-    //  Step 2: Volume Cell Redistribution (Owned Domain)
-    //   - Dispatches cell types and node GID connectivity to their assigned target ranks
-    //     computed by dKaMinPar; immediately frees raw cell arrays (`m.ctype`, `m.cnodes`).
-    //   - Assembles local owned cells `[0, n_own)` in flat CSR format with zero heap fragmentation.
+    //  Step 2: Redistribute Owned Cells
+    //   - Packs cell GIDs, types, and node-GID connectivity by destination rank.
+    //   - Releases raw cell arrays after packing and send buffers after exchange.
+    //   - Assembles received owned-cell metadata and flat connectivity.
+    //   - Builds a GID-to-local lookup using dense storage for compact ranges
+    //     or an open-addressed table for sparse ranges.
     //
-    //  Step 3: Face Migration & Ghost-Layer Cell Detection
-    //   - Routes local/boundary faces to their respective owner ranks.
-    //   - Duplicates inter-domain cut faces ($msg_a$, $msg_b$) to both adjacent partition owners.
-    //   - Detects all required ghost cells and sorts them strictly by `(donor_rank, cell_gid)`
-    //     to guarantee contiguous halo slices in memory.
+    //  Step 3: Migrate Faces & Identify Ghost Cells
+    //   - Sends boundary faces and faces internal to one destination rank once.
+    //   - Sends each face crossing destination ranks to both adjacent owners,
+    //     with the local owned cell as face owner on each receiving rank.
+    //   - Releases the original FaceRec storage after conversion/packing.
+    //   - Deduplicates required ghost cells and sorts them by
+    //     (donor_rank, cell_gid), giving contiguous receive-halo groups.
     //
-    //  Step 4: Ghost Cell Topology Exchange
-    //   - Queries donor ranks for element types and node connectivity lists for all
-    //     ghost cells in the one-hop halo layer; packs them into flat ghost CSR tables.
+    //  Step 4: Fetch Ghost Cell Connectivity
+    //   - Requests types and complete node-GID lists from the new cell owners.
+    //   - Builds flat topology arrays for the one-layer ghost-cell set.
     //
-    //  Step 5: Selective Node Coordinate Migration
-    //   - Extracts the exact minimal set of unique node GIDs needed for owned + ghost cells;
-    //   - Queries original node owners via `m.node_displ` to fetch exact `(x, y, z)` coordinates;
-    //   - Destructively frees raw coordinate storage (`m.my_node_coords_*`).
+    //  Step 5: Collect & Number Required Nodes
+    //   - Collects unique node GIDs used by owned and ghost cells.
+    //   - Places nodes used by owned cells first, followed by ghost-only nodes;
+    //     each group is ordered by global node ID.
+    //   - Uses a dense scan for compact GID ranges or sorts unique sparse IDs.
+    //   - "Owned nodes" here means nodes referenced by owned cells, not exclusive
+    //     global node ownership: neighboring ranks may store the same node.
     //
-    //  Step 6: Local Contiguous Renumbering & Cell CSR Construction
-    //   - Maps global node IDs to local indices: owned nodes `[0, n_nodes_own)`, ghost-only `[n_nodes_own, n_nodes)`;
-    //   - Renumbers owned cells to `[0, n_own)` and ghost cells to `[n_own, n_cells)`;
-    //   - Builds final flattened `cell_nodes_offsets` and `cell_nodes` arrays.
+    //  Step 6: Assemble Local Cells & Fetch Coordinates
+    //   - Numbers owned cells in [0, n_own) and ghosts in [n_own, n_cells).
+    //   - Moves owned metadata, appends ghost metadata, and converts node GIDs
+    //     into local indices in the final cell CSR arrays.
+    //   - Releases temporary global connectivity and the node lookup before
+    //     allocating/fetching final coordinates.
+    //   - Copies coordinates held locally and requests only remote coordinates
+    //     from original node owners using `m.node_displ`.
+    //   - Releases raw coordinates after their last use; the eligible
+    //     single-rank path moves coordinate arrays directly.
     //
-    //  Step 7: Canonical Face Reconstruction & CGNS Normal Orientation
-    //   - Resolves face-to-cell connectivity (`face_owner` and `face_neigh`);
-    //   - Reconstructs oriented face node lists using canonical CGNS tables (`kFaceTable`),
-    //     strictly guaranteeing outward-pointing normals from `face_owner` toward `face_neigh`.
-    //   - Sorts local faces lexicographically by `(owner, neigh)`.
+    //  Step 7: Reconstruct Local Faces
+    //   - Resolves local owner and neighbor indices; boundary neighbors are -1.
+    //   - Sorts compact face records lexicographically by (owner, neigh).
+    //   - Builds face metadata and flat face-node connectivity directly from
+    //     the owner's local face index and canonical CGNS face tables.
+    //   - Preserves the tables' owner-relative orientation; outward geometric
+    //     orientation assumes valid, correctly oriented input cells.
     //
-    //  Step 8: Symmetric Communication Map Assembly (Halo Exchange Engine)
-    //   - Identifies active neighboring ranks (`nb_ranks`);
-    //   - Builds contiguous `recv_offsets` and `recv_ghost_local` index maps;
-    //   - Executes a reverse handshake to construct mirror `send_offsets` and `send_owned_local`
-    //     maps, enabling zero-copy non-blocking MPI halo exchanges in the solver.
+    //  Step 8: Construct Halo Communication Maps
+    //   - Lists neighboring donor ranks and builds contiguous receive groups.
+    //   - Exchanges requested ghost-cell GIDs to construct corresponding
+    //     send_owned_local and send_offsets arrays on donor ranks.
+    //   - Produces matching send/receive index order for later field exchanges;
+    //     packing and MPI execution are handled by the solver's halo layer.
     //
-    //  Step 9: Boundary Condition Patches, Global Deduplication & Sanity Verification
-    //   - Groups boundary faces into individual BC patches using 2-pass flat CSR tables;
-    //   - Computes global Bounding Box (`bbox_lo`, `bbox_hi`);
-    //   - Calculates exact unique global face counts by deducting `pr.global_edge_cut` duplicates;
-    //   - Runs full structure invariant validation (`meshpart_sane`).
+    //  Step 9: Build Patches, Statistics & Structural Checks
+    //   - Copies BC metadata and groups faces with valid patch IDs into flat
+    //     patch-face CSR arrays.
+    //   - Reduces the bounding box over nodes referenced by owned cells.
+    //   - Computes unique global face count as summed local face counts minus
+    //     `pr.global_edge_cut`, accounting for duplicated partition-cut faces.
+    //   - Reports the global count of faces assigned to valid BC patches;
+    //     unassigned boundary faces are not included in that count.
+    //   - Runs meshpart_sane() structural checks and aborts on detected errors.
     //
-    // After this call, `mp` (MeshPart) contains a fully self-contained, cache-aligned,
-    // rank-local subdomain ready for geometric metric calculation and direct parallel binary serialization.
+    // After this call:
+    //  - `mp` contains owned cells, their face-neighbor ghosts, required nodes,
+    //    local connectivity, boundary patches, and halo communication maps.
+    //  - Partition-cut faces occur on both adjacent ranks.
+    //  - Geometry metrics and any subsequent reordering are separate operations.
     cfd::mesh::MeshPart mp;
     cfd::mesh::migrate_local_mesh(std::move(m), std::move(dual_graph.faces), pr, mp);
 
